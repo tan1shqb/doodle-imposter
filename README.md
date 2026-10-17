@@ -27,12 +27,18 @@ screenshots of the key screens.
 
 1. One player creates a room (private, or listed in "Public lobbies"). Others join with the
    5-character code, a QR code or link, or by picking a public lobby.
-2. The host starts. The server picks the imposter and a prompt. Normal players see the category
-   and word; the imposter only sees a hint.
+2. The host picks how many imposters (1 to 3; there must always be more innocents than imposters)
+   and starts. The server picks the imposters and a prompt. Normal players see the category and
+   word; imposters only see a hint, and don't know who the other imposters are.
 3. Everyone draws for 45 seconds. Unsubmitted drawings are submitted automatically at zero.
-4. All drawings are revealed at once. Players discuss (15 seconds), then vote (15 seconds).
-5. If the imposter is the single most-voted player they are caught, but get one guess at the word.
-   A right guess steals the win. A tie, no votes, or voting for the wrong person lets the imposter win.
+4. All drawings are revealed at once. Players discuss (15 seconds), then vote (15 seconds),
+   picking one suspect per imposter.
+5. The most-voted players (as many as there are imposters) are accused. If every imposter is
+   accused they are caught, but each gets one guess at the word, and any right guess steals the win.
+   Missing an imposter, a tie for the last accused spot, or no votes lets the imposters win.
+   If an imposter leaves, the round goes on with one fewer (everyone is told, and votes again if
+   voting had started); it is cancelled only when every imposter has left, or when innocents would
+   no longer outnumber the imposters.
 
 ## Rules the server enforces
 

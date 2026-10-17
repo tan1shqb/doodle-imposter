@@ -190,6 +190,7 @@ function viewFor(room, p) {
       min: CFG.MIN_PLAYERS,
       max: CFG.MAX_PLAYERS,
       host: room.hostId,
+      imposters: r ? r.imposterIds.length : lobbyImposters(room), // how many, never who
       players: room.players.map((q) => ({
         id: q.id,
         name: q.name,
@@ -203,7 +204,7 @@ function viewFor(room, p) {
     },
   };
   if (!r || p.waiting) return view; // late arrivals sit this round out and see nothing of it
-  const isImposter = p.id === r.imposterId;
+  const isImposter = r.imposterIds.includes(p.id);
   if (room.phase === 'prompt' || room.phase === 'draw') {
     view.secret = isImposter
       ? { role: 'imposter', hint: r.prompt.hint }
@@ -220,7 +221,7 @@ function viewFor(room, p) {
     }
   }
   if (room.phase === 'guess') {
-    view.guess = { imposter: isImposter, hint: isImposter ? r.prompt.hint : undefined };
+    view.guess = { imposter: isImposter, hint: isImposter ? r.prompt.hint : undefined, done: isImposter && p.id in r.guesses };
   }
   if (room.phase === 'results') view.result = r.result;
   return view;
@@ -250,6 +251,9 @@ function setPhase(room, phase, ms, onTimeout) {
   for (const p of room.players) p.ready = false;
 }
 
+/** Innocents must always outnumber imposters. */
+const maxImposters = (n) => Math.max(1, Math.floor((n - 1) / 2));
+const lobbyImposters = (room) => Math.min(room.imposters, maxImposters(room.players.filter((p) => p.connected).length));
 const inRound = (room) => room.players.filter((p) => !p.waiting);
 const activeOf = (room) => room.players.filter((p) => p.connected && !p.waiting);
 const allDone = (room, pred) => {
@@ -276,17 +280,23 @@ function startRound(room) {
   if (room.players.length < CFG.MIN_PLAYERS) return false;
   for (const p of room.players) p.waiting = false;
   if (!room.players.some((p) => p.id === room.hostId)) room.hostId = room.players[0].id;
-  const imposter = room.players[crypto.randomInt(room.players.length)];
+  const pool = room.players.slice();
+  const imposterIds = [];
+  for (let k = Math.min(room.imposters, maxImposters(pool.length)); k > 0; k--) {
+    imposterIds.push(pool.splice(crypto.randomInt(pool.length), 1)[0].id);
+  }
   room.roundNo += 1;
   room.round = {
-    imposterId: imposter.id,
+    imposterIds,
+    startImposters: imposterIds.length,
     prompt: pickPrompt(room),
     drawings: null,
     reactions: {},
-    votes: {},
-    guess: null,
+    votes: {}, // voter id -> [suspect ids], one per imposter
+    guesses: {}, // imposter id -> their guess at the word
     caught: false,
-    top: [],
+    accused: [],
+    tie: false,
     counts: {},
     result: null,
   };
@@ -331,13 +341,16 @@ function startVote(room) {
 function endVote(room) {
   if (room.phase !== 'vote') return;
   const r = room.round;
+  const n = r.imposterIds.length;
   const counts = {};
-  for (const t of Object.values(r.votes)) counts[t] = (counts[t] || 0) + 1;
-  const max = Math.max(0, ...Object.values(counts));
+  for (const picks of Object.values(r.votes)) for (const t of picks) counts[t] = (counts[t] || 0) + 1;
   r.counts = counts;
-  r.top = max > 0 ? Object.keys(counts).filter((k) => counts[k] === max) : [];
-  // Caught only if the imposter is the single most-voted player. A tie lets them escape.
-  r.caught = r.top.length === 1 && r.top[0] === r.imposterId;
+  const ranked = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  // The accused are the n most-voted. If the cut-off is tied, nobody knows who is accused,
+  // so the imposters slip away, just like a tie for one imposter.
+  r.tie = ranked.length > n && counts[ranked[n]] === counts[ranked[n - 1]];
+  r.accused = r.tie ? [] : ranked.slice(0, n);
+  r.caught = r.imposterIds.every((id) => r.accused.includes(id));
   if (r.caught) {
     setPhase(room, 'guess', CFG.GUESS_MS, () => finish(room));
     broadcast(room);
@@ -349,29 +362,37 @@ function endVote(room) {
 function finish(room) {
   if (room.phase === 'results' || !room.round) return;
   const r = room.round;
-  const imp = room.players.find((p) => p.id === r.imposterId);
+  const guessed = Object.values(r.guesses).filter((g) => g != null);
   let winner;
   let reason;
   let guessCorrect = null;
   if (!r.caught) {
     winner = 'imposter';
-    reason = r.top.length === 0 ? 'novotes' : r.top.length > 1 ? 'tie' : 'wrongsuspect';
+    reason = !Object.keys(r.counts).length ? 'novotes' : r.tie ? 'tie' : 'wrongsuspect';
   } else {
-    guessCorrect = r.guess != null && sameWord(r.guess, r.prompt.word);
+    guessCorrect = guessed.some((g) => sameWord(g, r.prompt.word)); // any imposter can steal it
     winner = guessCorrect ? 'imposter' : 'players';
-    reason = guessCorrect ? 'guessright' : r.guess == null ? 'noguess' : 'guesswrong';
+    reason = guessCorrect ? 'guessright' : guessed.length ? 'guesswrong' : 'noguess';
   }
   r.result = {
-    imposterId: r.imposterId,
-    imposterName: imp ? imp.name : 'The imposter',
-    imposterColor: imp ? imp.color : 0,
+    imposters: r.imposterIds.map((id) => {
+      const p = room.players.find((q) => q.id === id);
+      const guess = r.guesses[id] ?? null;
+      return {
+        id,
+        name: p ? p.name : 'An imposter',
+        color: p ? p.color : 0,
+        caught: r.accused.includes(id),
+        guess,
+        guessCorrect: guess != null && sameWord(guess, r.prompt.word),
+      };
+    }),
     word: r.prompt.word,
     category: r.prompt.category,
     hint: r.prompt.hint,
     caught: r.caught,
     winner,
     reason,
-    guess: r.guess,
     guessCorrect,
     tally: inRound(room)
       .map((p) => ({ id: p.id, name: p.name, color: p.color, count: r.counts[p.id] || 0 }))
@@ -396,6 +417,11 @@ function checkProgress(room) {
     case 'vote':
       if (allDone(room, (p) => p.hasVoted)) endVote(room);
       break;
+    case 'guess': {
+      const r = room.round;
+      if (r.imposterIds.every((id) => id in r.guesses || !room.players.some((q) => q.id === id && q.connected))) finish(room);
+      break;
+    }
     default:
   }
 }
@@ -444,18 +470,35 @@ function leaveMidRound(room, p) {
     return endGame(room, 'Not enough players left, so the game ended.');
   }
   const r = room.round;
-  if (p.id === r.imposterId) return abortToLobby(room, 'The imposter left, so the round was cancelled.');
+  let message = `${p.name} left the game.`;
+  if (r.imposterIds.includes(p.id)) {
+    r.imposterIds = r.imposterIds.filter((id) => id !== p.id);
+    if (!r.imposterIds.length) {
+      return abortToLobby(room, r.startImposters > 1 ? 'The imposters left, so the round was cancelled.' : 'The imposter left, so the round was cancelled.');
+    }
+    // The count is public (everyone needs it to vote), so it gives the leaver away anyway: say it plainly.
+    const n = r.imposterIds.length;
+    message = `${p.name} left. They were an imposter, so now there ${n > 1 ? `are ${n} imposters` : 'is 1 imposter'}.`;
+    delete r.guesses[p.id];
+    if (room.phase === 'vote') {
+      for (const q of room.players) q.hasVoted = false; // everyone votes again, one pick per imposter left
+      r.votes = {};
+      message += ' Vote again.';
+    }
+  } else if (inRound(room).length - r.imposterIds.length <= r.imposterIds.length) {
+    return abortToLobby(room, 'Too few players left for this many imposters, so the round was cancelled.');
+  }
   delete r.votes[p.id];
-  for (const [voter, target] of Object.entries(r.votes)) {
-    if (target !== p.id) continue;
-    delete r.votes[voter]; // their pick is gone, so they vote again
+  for (const [voter, picks] of Object.entries(r.votes)) {
+    if (!picks.includes(p.id)) continue;
+    delete r.votes[voter]; // one of their picks is gone, so they vote again
     const q = room.players.find((x) => x.id === voter);
     if (q) q.hasVoted = false;
   }
   if (r.drawings) r.drawings = r.drawings.filter((d) => d.id !== p.id);
   delete r.reactions[p.id];
   for (const lists of Object.values(r.reactions)) lists.forEach((ids, i) => { lists[i] = ids.filter((id) => id !== p.id); });
-  for (const q of activeOf(room)) send(q.ws, { t: 'notice', message: `${p.name} left the game.` });
+  for (const q of activeOf(room)) send(q.ws, { t: 'notice', message });
   checkProgress(room);
   if (room.phase !== 'results') broadcast(room);
 }
@@ -582,6 +625,7 @@ function handle(ws, msg) {
         hostId: null,
         round: null,
         roundNo: 0,
+        imposters: 1, // host's choice; capped by maxImposters() for the players present
         deadline: null,
         timer: null,
         used: new Set(),
@@ -649,6 +693,15 @@ function handle(ws, msg) {
       return removePlayer(room, target);
     }
 
+    case 'setImposters': {
+      if (p.id !== room.hostId || room.phase !== 'lobby') return;
+      const n = Number(msg.value);
+      const most = maxImposters(room.players.filter((q) => q.connected).length);
+      if (!Number.isInteger(n) || n < 1 || n > most) return err(ws, 'imposters', `With this many players you can have up to ${most} imposter${most > 1 ? 's' : ''}.`);
+      room.imposters = n;
+      return broadcast(room);
+    }
+
     case 'start':
       if (p.id !== room.hostId || room.phase !== 'lobby') return;
       if (activeOf(room).length < CFG.MIN_PLAYERS) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`);
@@ -685,19 +738,27 @@ function handle(ws, msg) {
       return;
 
     case 'vote': {
-      if (room.phase !== 'vote' || p.hasVoted) return;
-      const target = String(msg.target ?? '');
-      if (p.waiting || target === p.id || !inRound(room).some((q) => q.id === target)) return;
-      room.round.votes[p.id] = target;
+      if (room.phase !== 'vote' || p.hasVoted || p.waiting) return;
+      // one suspect per imposter; `target` is the one-imposter form
+      const picks = Array.isArray(msg.targets) ? msg.targets.map(String) : [String(msg.target ?? '')];
+      const ok = picks.length === room.round.imposterIds.length && new Set(picks).size === picks.length
+        && picks.every((t) => t !== p.id && inRound(room).some((q) => q.id === t));
+      if (!ok) return;
+      room.round.votes[p.id] = picks;
       p.hasVoted = true;
       if (allDone(room, (q) => q.hasVoted)) return endVote(room);
       return broadcast(room);
     }
 
-    case 'guess':
-      if (room.phase !== 'guess' || p.id !== room.round.imposterId) return;
-      room.round.guess = String(msg.word ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 40) || null;
-      return finish(room);
+    case 'guess': {
+      const r = room.round;
+      if (room.phase !== 'guess' || !r.imposterIds.includes(p.id) || p.id in r.guesses) return;
+      r.guesses[p.id] = String(msg.word ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 40) || null;
+      // a right guess wins it straight away; otherwise wait for every imposter (or the timer)
+      const right = r.guesses[p.id] != null && sameWord(r.guesses[p.id], r.prompt.word);
+      if (right || r.imposterIds.every((id) => id in r.guesses || !room.players.some((q) => q.id === id && q.connected))) return finish(room);
+      return broadcast(room);
+    }
 
     case 'again':
       if (p.id !== room.hostId || room.phase !== 'results') return;

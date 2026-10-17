@@ -291,6 +291,63 @@ async function main() {
       await cleo.close();
       await late.close();
     }
+
+    // ------------------------------------------------------ two imposters
+    console.log('More than one imposter');
+    {
+      const { ps } = await makeRoom(PORT, ['Ava', 'Ben', 'Cleo', 'Dev', 'Eve']);
+      const host = await newPage(browser, PORT, errors);
+      await takeSeat(host, ps[0]);
+      const more = host.getByRole('button', { name: 'More imposters' });
+      await more.waitFor();
+      ok(await host.getByRole('button', { name: 'Fewer imposters' }).isDisabled(), 'the host can’t go below 1 imposter');
+      await more.click();
+      await until(async () => (await host.locator('.step-n').textContent()) === '2', 'count shows 2');
+      ok(await more.isDisabled(), 'with 5 players the host can’t go above 2');
+      ok((await host.locator('.note').textContent()).includes('2 imposters'), 'the lobby shows the new count');
+      await shot(host, 'lobby-imposters');
+      const others = ps.slice(1); // ps[0]'s seat now belongs to the page
+      await host.getByRole('button', { name: 'Start game' }).click();
+      await host.getByRole('button', { name: "I'm ready" }).click();
+      others.forEach((p) => p.send({ t: 'ready' }));
+      await host.waitForSelector('canvas.pad');
+      await host.getByRole('button', { name: 'Submit drawing' }).click();
+      others.forEach((p) => p.send({ t: 'drawing', strokes: [], final: true }));
+      await host.getByText('Who looks suspicious?').waitFor();
+      others.forEach((p) => p.send({ t: 'ready' }));
+      await host.getByRole('button', { name: 'Vote now' }).click();
+      await host.getByText('Find the 2 imposters').waitFor();
+      const submit = host.getByRole('button', { name: /Submit votes/ });
+      ok((await submit.textContent()).includes('0/2') && await submit.isDisabled(), 'the vote asks for 2 picks and starts with none');
+      const boxes = host.locator('.choice input[type=checkbox]');
+      await boxes.nth(0).check();
+      ok(await submit.isDisabled() && (await submit.textContent()).includes('1/2'), 'one pick is not enough');
+      await boxes.nth(1).check();
+      await boxes.nth(2).click();
+      ok(!(await boxes.nth(2).isChecked()) && (await host.locator('#toast').textContent()).includes('Untick one'), 'a third pick is refused with a hint');
+      ok(await submit.isEnabled() && (await submit.textContent()).includes('2/2'), 'two picks can be submitted');
+      await shot(host, 'vote-two-imposters');
+      await submit.click();
+      await host.getByText('Vote locked in!').waitFor();
+      ok(true, 'the vote goes through');
+      // everyone else votes for the first two players who are not themselves
+      for (const p of others) {
+        const st = p.last('state');
+        p.send({ t: 'vote', targets: st.room.players.map((q) => q.id).filter((id) => id !== p.seat.id).slice(0, 2) });
+      }
+      // if both imposters happen to be caught, they each guess (wrong) first
+      await until(async () => (await host.getByText('The imposters were…').count()) || others.some((p) => p.last('state').room.phase === 'guess'), 'results or guess', 8000);
+      await sleep(200);
+      if (await host.locator('#gs').count()) {
+        await host.locator('#gs').fill('nope');
+        await host.getByRole('button', { name: 'Lock in guess' }).click();
+      }
+      for (const p of others) if (p.last('state').room.phase === 'guess' && p.last('state').guess && p.last('state').guess.imposter) p.send({ t: 'guess', word: 'nope' });
+      await host.getByText('The imposters were…').waitFor({ timeout: 8000 });
+      ok(await host.locator('.imps .row').count() === 2, 'results list both imposters, each marked caught or escaped');
+      await shot(host, 'results-two-imposters');
+      await host.close();
+    }
   } catch (e) {
     failures++;
     console.log(`  ✗ ${e.message}`);

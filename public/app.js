@@ -50,7 +50,7 @@
     key: null,
     handle: null,
     name: store.get('di_name') || '',
-    ui: { round: -1, voteChoice: null, myStrokes: [], guessText: '', sizeIdx: 1, colorIdx: 0, tool: 'pencil', codePrefill: urlRoom },
+    ui: { round: -1, votePicks: [], myStrokes: [], guessText: '', sizeIdx: 1, colorIdx: 0, tool: 'pencil', codePrefill: urlRoom },
   };
   const nowMs = () => Date.now() + S.offset;
 
@@ -606,7 +606,7 @@
         }
         if (S.ui.round !== m.room.round) {
           S.ui.round = m.room.round;
-          S.ui.voteChoice = null;
+          S.ui.votePicks = [];
           S.ui.myStrokes = [];
           S.ui.guessText = '';
         }
@@ -657,6 +657,8 @@
   const me = (st) => st.room.players.find((p) => p.id === st.you);
   const playing = (p) => p.connected && !p.waiting; // in this round and online
   const connectedCount = (st) => st.room.players.filter(playing).length;
+  const maxImposters = (n) => Math.max(1, Math.floor((n - 1) / 2)); // innocents always outnumber imposters, as on the server
+  const imposterWord = (n) => (n > 1 ? `${n} imposters` : '1 imposter');
 
   function statusList(st, key, doneText, waitText) {
     return h('div', { class: 'plist' }, st.room.players.map((p) => {
@@ -801,12 +803,35 @@
           h('input', { type: 'checkbox', checked: r.public, onChange: (e) => send({ t: 'setPublic', value: e.target.checked }) }),
           'Show in the public lobby list')
         : null,
-      h('p', { class: 'note', text: `Min. ${r.min} players · 45 sec drawing · 1 imposter` }),
+      imposterSetting(st, isHost),
+      h('p', { class: 'note', text: `Min. ${r.min} players · 45 sec drawing · ${imposterWord(r.imposters)}` }),
       h('div', { class: 'spacer' }),
       isHost
         ? btn(ready ? 'Start game' : `Need ${r.min - connectedCount(st)} more`, () => send({ t: 'start' }), { disabled: !ready })
         : btn('Waiting for host…', () => {}, { disabled: true })));
   };
+
+  /** How many imposters: the host can change it, everyone else just sees it. */
+  function imposterSetting(st, isHost) {
+    const n = st.room.imposters;
+    const players = connectedCount(st);
+    const most = maxImposters(players);
+    const step = (label, sign, disabled) => h('button', {
+      class: 'step', type: 'button', 'aria-label': label, disabled, onClick: () => send({ t: 'setImposters', value: n + sign }),
+    }, sign < 0 ? '−' : '+');
+    const more = 2 * (most + 1) + 1; // players needed for one more imposter
+    return h('div', { class: 'col' },
+      h('div', { class: 'stepper' },
+        h('span', { class: 'label grow', text: 'Imposters' }),
+        isHost ? step('Fewer imposters', -1, n <= 1) : null,
+        h('span', { class: 'step-n', text: String(n), 'aria-live': 'polite' }),
+        isHost ? step('More imposters', 1, n >= most) : null),
+      isHost
+        ? h('p', { class: 'small', text: more <= st.room.max
+          ? `There must be more players than imposters. ${more} players allows ${most + 1}.`
+          : 'There must be more players than imposters.' })
+        : null);
+  }
 
   /** Big text that shrinks until its longest word fits on a line, so words never break in the middle. */
   function bigText(cls, text) {
@@ -844,7 +869,10 @@
       imp
         ? h('div', { class: 'card shadow col center' }, h('div', { class: 'qmark', text: '?' }), bigText('big-word mid', sec.hint))
         : h('div', { class: 'card shadow col center' }, h('div', { class: 'caps', text: `Category: ${sec.category}` }), bigText('big-word', sec.word)),
-      h('p', { class: 'sub tall', text: imp ? "You don't know the secret word. Draw something that fits the hint." : 'Draw the word without showing anyone your screen.' }),
+      h('p', { class: 'sub tall', text: r.imposters > 1
+        ? (imp ? `There are ${r.imposters} imposters. You don't know the secret word, or who the others are. Draw something that fits the hint.`
+          : `There are ${r.imposters} imposters this round. Draw the word without showing anyone your screen.`)
+        : (imp ? "You don't know the secret word. Draw something that fits the hint." : 'Draw the word without showing anyone your screen.') }),
       h('div', { class: 'spacer' }),
       waiting
         ? [h('p', { class: 'small center' }, `${readyN} of ${connectedCount(st)} ready · drawing starts in `, timerText(r.deadline)),
@@ -1050,32 +1078,42 @@
   // ----- vote
   screens.vote = (root, st) => {
     setBg('#D3EAFF');
-    const submit = btn('Submit vote', () => {
-      if (S.ui.voteChoice) send({ t: 'vote', target: S.ui.voteChoice });
-    }, { disabled: !S.ui.voteChoice });
-    const choices = (st.drawings || []).filter((d) => d.id !== st.you).map((d) => {
-      const radio = h('input', { type: 'radio', name: 'vote', 'aria-label': `Vote for ${d.name}`, checked: S.ui.voteChoice === d.id });
-      const label = h('label', { class: `choice${S.ui.voteChoice === d.id ? ' on' : ''}` },
+    const need = st.room.imposters; // one suspect per imposter
+    const others = (st.drawings || []).filter((d) => d.id !== st.you);
+    const picks = S.ui.votePicks = S.ui.votePicks.filter((id) => others.some((d) => d.id === id)).slice(0, need);
+    const submit = btn('', () => {
+      if (picks.length === need) send({ t: 'vote', targets: picks });
+    });
+    const sync = () => {
+      submit.textContent = need > 1 ? `Submit votes (${picks.length}/${need})` : 'Submit vote';
+      submit.disabled = picks.length !== need;
+      root.querySelectorAll('.choice').forEach((c) => c.classList.toggle('on', picks.includes(c.dataset.id)));
+    };
+    const choices = others.map((d) => {
+      const input = h('input', { type: need > 1 ? 'checkbox' : 'radio', name: 'vote', 'aria-label': `Vote for ${d.name}`, checked: picks.includes(d.id) });
+      const label = h('label', { class: 'choice', 'data-id': d.id },
         h('div', { class: 'thumb-sm' }, thumb(d.strokes)),
         h('span', { class: 'nm', text: d.name }),
-        radio);
-      radio.addEventListener('change', () => {
-        S.ui.voteChoice = d.id;
-        root.querySelectorAll('.choice').forEach((c) => c.classList.remove('on'));
-        label.classList.add('on');
-        submit.disabled = false;
+        input);
+      input.addEventListener('change', () => {
+        if (need === 1) picks.splice(0, picks.length, d.id);
+        else if (!input.checked) picks.splice(picks.indexOf(d.id), 1);
+        else if (picks.length >= need) { input.checked = false; toast(`You can pick ${need}. Untick one first.`); }
+        else picks.push(d.id);
+        sync();
       });
       return label;
     });
     root.append(screenEl('',
       h('div', { class: 'row between' }, h('span'), timerPill(st.room.deadline)),
       h('div', { class: 'center' },
-        h('h1', { class: 'h1', text: 'Find the imposter' }),
-        h('p', { class: 'sub', text: 'Choose one player. Your vote is private.' })),
+        h('h1', { class: 'h1', text: need > 1 ? `Find the ${need} imposters` : 'Find the imposter' }),
+        h('p', { class: 'sub', text: need > 1 ? `Pick ${need} players. You need to catch them all. Your votes are private.` : 'Choose one player. Your vote is private.' })),
       h('div', { class: 'col choices' }, choices),
       h('p', { class: 'small center row' }, icon('lock', 20, '#33405A'), 'Votes stay hidden until everyone has voted.'),
       h('div', { class: 'spacer' }),
       submit));
+    sync();
     const beeps = countdown(0);
     return { update() {}, tick() { beeps(st.room.deadline); } };
   };
@@ -1109,10 +1147,14 @@
       h('div', { class: 'row' }, h('span', { class: 'spacer' }), timerPill(st.room.deadline)),
       h('div', { class: 'center' },
         h('h1', { class: 'h1 huge', text: 'Caught!' }),
-        h('p', { class: 'sub tall', text: 'The group voted for you. You still have one shot to steal the win.' })),
+        h('p', { class: 'sub tall', text: st.room.imposters > 1
+          ? 'The group caught every imposter, you included. You still have one shot to steal the win.'
+          : 'The group voted for you. You still have one shot to steal the win.' })),
       h('div', { class: 'card shadow col center' }, h('div', { class: 'caps small', text: 'Your hint was' }), bigText('big-word mid', st.guess.hint || '')),
       h('div', { class: 'col' }, h('label', { class: 'label', for: 'gs', text: 'What was the secret word?' }), input,
-        h('p', { class: 'small center', text: 'One guess only. Get it right and the imposter wins.' })),
+        h('p', { class: 'small center', text: st.room.imposters > 1
+          ? 'One guess each. If any imposter gets it right, the imposters win.'
+          : 'One guess only. Get it right and the imposter wins.' })),
       h('div', { class: 'spacer' }),
       btn('Lock in guess', go)));
     return { update() {} };
@@ -1125,8 +1167,11 @@
       h('div', { class: 'spacer' }),
       h('div', { class: 'card shadow col center' },
         h('div', { class: 'qmark', text: '?' }),
-        h('h1', { class: 'h1', text: 'Imposter caught!' }),
-        h('p', { class: 'sub', text: 'They get one chance to guess the secret word. Fingers crossed…' })),
+        st.guess.imposter
+          ? [h('h1', { class: 'h1', text: 'Guess locked in!' }), h('p', { class: 'sub', text: 'Waiting for the other imposters to guess…' })]
+          : st.room.imposters > 1
+            ? [h('h1', { class: 'h1', text: 'Imposters caught!' }), h('p', { class: 'sub', text: 'They each get one chance to guess the secret word. Fingers crossed…' })]
+            : [h('h1', { class: 'h1', text: 'Imposter caught!' }), h('p', { class: 'sub', text: 'They get one chance to guess the secret word. Fingers crossed…' })]),
       h('div', { class: 'spacer' })));
   };
 
@@ -1136,7 +1181,7 @@
     const r = st.room;
     const doing = {
       prompt: 'reading their prompts', draw: 'drawing', reveal: 'looking at the drawings',
-      vote: 'voting', guess: 'waiting on the imposter’s last guess', results: 'looking at the results',
+      vote: 'voting', guess: 'waiting on the last guess', results: 'looking at the results',
     }[r.phase] || 'playing';
     root.append(screenEl('',
       header("You're in!", leaveGame, soundBtn()),
@@ -1160,26 +1205,36 @@
     const r = st.result;
     const isHost = st.room.host === st.you;
     const win = r.winner === 'players';
+    const imps = r.imposters;
+    const many = imps.length > 1;
+    const one = imps[0];
     const lines = [h('p', { class: 'res-line' }, 'The secret word was ', h('b', { class: 'chip-word', text: r.word.toUpperCase() }), '.'),
-      h('p', { class: 'res-line', text: `${r.imposterName}’s hint was “${r.hint}”.` })];
+      h('p', { class: 'res-line', text: many ? `The imposters’ hint was “${r.hint}”.` : `${one.name}’s hint was “${r.hint}”.` })];
+    const right = imps.find((i) => i.guessCorrect);
     const why = {
-      guessright: `${r.imposterName} guessed “${r.guess}” and stole the win!`,
-      guesswrong: `${r.imposterName} guessed “${r.guess}”. Not quite.`,
-      noguess: `${r.imposterName} ran out of time to guess.`,
-      tie: 'The vote was tied, so the imposter slipped away.',
-      wrongsuspect: 'The group voted for the wrong person.',
-      novotes: 'Nobody voted, so the imposter got away.',
+      guessright: right && `${right.name} guessed “${right.guess}” and stole the win!`,
+      guesswrong: many
+        ? `${imps.filter((i) => i.guess).map((i) => `${i.name} guessed “${i.guess}”`).join(', ')}. Not quite.`
+        : `${one.name} guessed “${one.guess}”. Not quite.`,
+      noguess: many ? 'The imposters ran out of time to guess.' : `${one.name} ran out of time to guess.`,
+      tie: many ? 'The vote was tied, so the imposters slipped away.' : 'The vote was tied, so the imposter slipped away.',
+      wrongsuspect: many ? `The group only caught ${imps.filter((i) => i.caught).length} of ${imps.length} imposters.` : 'The group voted for the wrong person.',
+      novotes: many ? 'Nobody voted, so the imposters got away.' : 'Nobody voted, so the imposter got away.',
     }[r.reason];
     if (why) lines.push(h('p', { class: 'res-line', text: why }));
     const maxVotes = Math.max(1, ...r.tally.map((t) => t.count));
 
     root.append(screenEl('',
-      h('h1', { class: 'h1', text: 'The imposter was…' }),
+      h('h1', { class: 'h1', text: many ? 'The imposters were…' : 'The imposter was…' }),
       h('div', { class: 'card shadow col center' },
-        h('div', { class: 'row' }, avatar(r.imposterColor, 'av lg'), h('span', { class: 'h1 name', text: r.imposterName })),
-        h('span', { class: `badge ${r.caught ? 'good' : 'bad'}`, text: r.caught ? 'CAUGHT!' : 'ESCAPED!' }),
+        many
+          ? h('div', { class: 'col imps' }, imps.map((i) => h('div', { class: 'row' },
+            avatar(i.color), h('span', { class: 'h2 grow', text: i.name }),
+            h('span', { class: `badge mini ${i.caught ? 'good' : 'bad'}`, text: i.caught ? 'CAUGHT' : 'ESCAPED' }))))
+          : h('div', { class: 'row' }, avatar(one.color, 'av lg'), h('span', { class: 'h1 name', text: one.name })),
+        h('span', { class: `badge ${r.caught ? 'good' : 'bad'}`, text: r.caught ? (many ? 'ALL CAUGHT!' : 'CAUGHT!') : 'ESCAPED!' }),
         lines),
-      h('div', { class: 'center' }, h('span', { class: 'pill' }, win ? 'Players win!' : 'Imposter wins!')),
+      h('div', { class: 'center' }, h('span', { class: 'pill' }, win ? 'Players win!' : many ? 'Imposters win!' : 'Imposter wins!')),
       h('div', { class: 'card col' },
         h('div', { class: 'h2', text: 'Votes' }),
         r.tally.map((t) => h('div', { class: 'row' },
@@ -1209,11 +1264,12 @@
         case 'draw': name = m && m.submitted ? 'drawWait' : 'draw'; break;
         case 'reveal': name = m && m.ready ? 'revealWait' : 'reveal'; break;
         case 'vote': name = m && m.voted ? 'voteWait' : 'vote'; break;
-        case 'guess': name = st.guess && st.guess.imposter ? 'guess' : 'guessWait'; break;
+        case 'guess': name = st.guess && st.guess.imposter && !st.guess.done ? 'guess' : 'guessWait'; break;
         default: name = 'results';
       }
     }
-    const key = `${name}:${st ? st.room.round : ''}`;
+    // the imposter count can drop mid-round (one left), and the vote screen is built around it
+    const key = `${name}:${st ? `${st.room.round}:${st.room.imposters}` : ''}`;
     if (key === S.key && S.handle && S.handle.update) {
       S.handle.update(st);
       return;

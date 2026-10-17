@@ -225,7 +225,7 @@ async function main() {
     await allPhase(players, 'results');
     let res = A.state.result;
     ok(res.caught && res.winner === 'players' && res.reason === 'guesswrong', 'wrong guess means the players win');
-    ok(res.word === word && res.imposterId === imp.state.you, 'results reveal the word and the imposter');
+    ok(res.word === word && res.imposters.length === 1 && res.imposters[0].id === imp.state.you, 'results reveal the word and the imposter');
     ok(res.tally[0].id === imp.state.you && res.tally[0].count === 3, 'vote tally is correct (3 votes)');
 
     // --------------------------------------------------- round 2: tie
@@ -432,6 +432,157 @@ async function main() {
     zImp.send({ t: 'leave' });
     await allPhase(zRest, 'lobby');
     ok(zRest[0].state.room.players.length === 3 && zRest[0].notices.some((m) => m.message.includes('imposter')), 'the round is cancelled if the imposter leaves');
+
+    console.log('More than one imposter');
+    const M = [];
+    for (let i = 0; i < 5; i++) M.push(await track(`M${i}`));
+    M[0].send({ t: 'create', name: 'M0', public: false });
+    await M[0].until((c) => c.joined, 'M room');
+    for (let i = 1; i < 4; i++) M[i].send({ t: 'join', code: M[0].joined.code, name: `M${i}` });
+    await M[0].until((c) => c.state.room.players.length === 4, 'M four');
+    M[0].send({ t: 'setImposters', value: 2 });
+    await M[0].until((c) => c.errors.some((e) => e.code === 'imposters'), 'too many imposters');
+    ok(M[0].state.room.imposters === 1, 'with 4 players you cannot have 2 imposters (innocents must outnumber them)');
+    M[4].send({ t: 'join', code: M[0].joined.code, name: 'M4' });
+    await M[0].until((c) => c.state.room.players.length === 5, 'M five');
+    M[1].send({ t: 'setImposters', value: 2 });
+    await sleep(100);
+    ok(M[0].state.room.imposters === 1, 'only the host can change the number of imposters');
+    M[0].send({ t: 'setImposters', value: 2 });
+    await Promise.all(M.map((c) => c.until((x2) => x2.state.room.imposters === 2, 'two imposters')));
+    ok(true, 'with 5 players the host can pick 2 imposters, and everyone sees it');
+    M[0].send({ t: 'setImposters', value: 3 });
+    await sleep(100);
+    ok(M[0].state.room.imposters === 2, 'but not 3');
+    M[4].send({ t: 'leave' });
+    await M[0].until((c) => c.state.room.players.length === 4, 'M4 leaves');
+    ok(M[0].state.room.imposters === 1, 'if players leave the lobby, the count drops to keep innocents ahead');
+    M[4] = await track('M4b');
+    M[4].send({ t: 'join', code: M[0].joined.code, name: 'M4' });
+    await M[0].until((c) => c.state.room.imposters === 2, 'back to 2');
+    ok(true, 'and comes back to the host’s choice when they return');
+
+    const roleOf = (c) => secretOf(c) && secretOf(c).role;
+    const playMulti = async (votesFor) => {
+      M[0].send({ t: M[0].phase() === 'results' ? 'again' : 'start' });
+      await toVote(M);
+      const imps = M.filter((c) => roleOf(c) === 'imposter');
+      const inn = M.filter((c) => roleOf(c) !== 'imposter');
+      M.forEach((c) => c.send({ t: 'vote', targets: votesFor(c, imps, inn).map((x2) => x2.state.you) }));
+      return { imps, inn };
+    };
+
+    let mr = await playMulti((c, imps, inn) => (imps.includes(c) ? inn.slice(0, 2) : imps));
+    ok(mr.imps.length === 2 && mr.inn.length === 3, 'the round has exactly 2 imposters');
+    ok(M.every((c) => c.raw.every((m) => !m.includes('imposterIds'))) && mr.imps.every((c) => !JSON.stringify(secretOf(c)).includes(mr.imps.find((x2) => x2 !== c).state.you)),
+      'imposters are not told who the other imposter is');
+    await allPhase(M, 'guess');
+    ok(mr.imps.every((c) => c.state.guess.imposter) && mr.inn.every((c) => !c.state.guess.imposter), 'catching both imposters gives each of them a guess');
+    mr.imps[0].send({ t: 'guess', word: 'nope' });
+    await mr.imps[0].until((c) => c.state.guess.done, 'first guess in');
+    ok(M[0].phase() === 'guess', 'the round waits for the other imposter to guess');
+    mr.imps[1].send({ t: 'guess', word: 'still nope' });
+    await allPhase(M, 'results');
+    res = M[0].state.result;
+    ok(res.winner === 'players' && res.reason === 'guesswrong' && res.imposters.length === 2 && res.imposters.every((i) => i.caught && i.guess), 'two wrong guesses: the players win');
+
+    mr = await playMulti((c, imps, inn) => (imps.includes(c) ? inn.slice(0, 2) : imps));
+    await allPhase(M, 'guess');
+    const mWord = secretOf(mr.inn[0]).word;
+    mr.imps[1].send({ t: 'guess', word: mWord });
+    await allPhase(M, 'results');
+    ok(M[0].state.result.reason === 'guessright' && M[0].state.result.winner === 'imposter', 'one right guess steals the win for all the imposters');
+
+    mr = await playMulti((c, imps, inn) => {
+      // imposter 0 and innocent 1 get 3 votes each; nobody else gets more than 2, so they are the accused
+      if (imps.includes(c)) return [inn[0], inn[1]];
+      return c === inn[2] ? [imps[0], inn[1]] : [imps[0], inn[2]];
+    });
+    await allPhase(M, 'results');
+    res = M[0].state.result;
+    ok(res.winner === 'imposter' && res.reason === 'wrongsuspect', 'catching only one of two imposters lets them win');
+    ok(res.imposters.filter((i) => i.caught).length === 1, 'results show which imposter was caught and which escaped');
+
+    mr = await playMulti((c, imps, inn) => {
+      // imposter 0 gets 3 votes, then three players tie on 2 for the second spot
+      const [I0, I1] = imps;
+      const [N0, N1, N2] = inn;
+      return { [I0.name]: [N0, N1], [I1.name]: [N0, N2], [N0.name]: [I0, I1], [N1.name]: [I0, N2], [N2.name]: [I0, N1] }[c.name];
+    });
+    await allPhase(M, 'results');
+    ok(M[0].state.result.reason === 'tie' && M[0].state.result.winner === 'imposter', 'a tie for the last accused spot lets the imposters escape');
+
+    M[0].send({ t: 'again' });
+    await allPhase(M, 'prompt');
+    M.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(M, 'draw');
+    M.forEach((c) => { c.secret = c.state.secret; }); // this round's roles, not last round's
+    const imp2 = M.filter((c) => roleOf(c) === 'imposter');
+    const inn2 = M.filter((c) => roleOf(c) !== 'imposter');
+    M.forEach((c) => c.send({ t: 'drawing', strokes: stroke(0.5), final: true }));
+    await allPhase(M, 'reveal');
+    M.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(M, 'vote');
+    const v = inn2[0];
+    v.send({ t: 'vote', target: imp2[0].state.you });
+    v.send({ t: 'vote', targets: [imp2[0].state.you, imp2[0].state.you] });
+    v.send({ t: 'vote', targets: [v.state.you, imp2[0].state.you] });
+    await sleep(150);
+    ok(!M[0].state.room.players.find((p) => p.id === v.state.you).voted, 'a vote must name one different player per imposter, and not yourself');
+    v.send({ t: 'vote', targets: [imp2[0].state.you, imp2[1].state.you] });
+    await M[0].until((c) => c.state.room.players.find((p) => p.id === v.state.you).voted, 'valid vote');
+    ok(true, 'a vote with two different suspects is accepted');
+    const one = inn2.find((c) => c !== v);
+    one.send({ t: 'leave' });
+    const stay = M.filter((c) => c !== one);
+    await allPhase(stay, 'lobby');
+    ok(stay[0].notices.some((m) => m.message.includes('this many imposters')), 'the round is cancelled if innocents would no longer outnumber the imposters');
+
+    const twoImposters = async (prefix) => {
+      const cs = [];
+      for (let i = 0; i < 5; i++) cs.push(await track(`${prefix}${i}`));
+      cs[0].send({ t: 'create', name: `${prefix}0`, public: false });
+      await cs[0].until((c) => c.joined, `${prefix} room`);
+      cs.slice(1).forEach((c, i) => c.send({ t: 'join', code: cs[0].joined.code, name: `${prefix}${i + 1}` }));
+      await cs[0].until((c) => c.state.room.players.length === 5, `${prefix} players`);
+      cs[0].send({ t: 'setImposters', value: 2 });
+      await cs[0].until((c) => c.state.room.imposters === 2, `${prefix} two imposters`);
+      cs[0].send({ t: 'start' });
+      await allPhase(cs, 'prompt');
+      cs.forEach((c) => c.send({ t: 'ready' }));
+      await allPhase(cs, 'draw');
+      cs.forEach((c) => { c.secret = c.state.secret; });
+      return { cs, imps: cs.filter((c) => roleOf(c) === 'imposter'), inn: cs.filter((c) => roleOf(c) !== 'imposter') };
+    };
+    const P = await twoImposters('P');
+    P.cs.forEach((c) => c.send({ t: 'drawing', strokes: stroke(0.5), final: true }));
+    await allPhase(P.cs, 'reveal');
+    P.cs.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(P.cs, 'vote');
+    P.inn[0].send({ t: 'vote', targets: P.imps.map((c) => c.state.you) });
+    await P.inn[1].until((c) => c.state.room.players.find((q) => q.id === P.inn[0].state.you).voted, 'P vote in');
+    P.imps[0].send({ t: 'leave' });
+    const pStay = P.cs.filter((c) => c !== P.imps[0]);
+    await Promise.all(pStay.map((c) => c.until((x2) => x2.state.room.imposters === 1, 'one imposter left')));
+    ok(pStay.every((c) => c.phase() === 'vote'), 'if one of two imposters leaves, the round goes on');
+    ok(pStay.every((c) => c.state.room.players.every((q) => !q.voted)), 'and everyone votes again, now for one suspect');
+    ok(pStay[0].notices.some((m) => m.message.includes('were an imposter') && m.message.includes('Vote again')), 'everyone is told an imposter left and to vote again');
+    pStay.forEach((c) => c.send({ t: 'vote', target: c === P.imps[1] ? P.inn[0].state.you : P.imps[1].state.you }));
+    await allPhase(pStay, 'guess');
+    P.imps[1].send({ t: 'guess', word: 'nope' });
+    await allPhase(pStay, 'results');
+    res = pStay[0].state.result;
+    ok(res.imposters.length === 1 && res.imposters[0].id === P.imps[1].state.you && res.winner === 'players', 'the remaining imposter can still be caught');
+
+    const Q = await twoImposters('Q');
+    Q.imps[0].send({ t: 'leave' });
+    const qStay = Q.cs.filter((c) => c !== Q.imps[0]);
+    await Promise.all(qStay.map((c) => c.until((x2) => x2.state.room.imposters === 1, 'Q one left')));
+    ok(qStay.every((c) => c.phase() === 'draw'), 'an imposter leaving while drawing does not stop the round');
+    Q.imps[1].send({ t: 'leave' });
+    const qRest = qStay.filter((c) => c !== Q.imps[1]);
+    await allPhase(qRest, 'lobby');
+    ok(qRest[0].notices.some((m) => m.message === 'The imposters left, so the round was cancelled.'), 'the round is cancelled once every imposter has left');
   } catch (e) {
     failures++;
     console.log(`  ✗ ${e.message}`);
