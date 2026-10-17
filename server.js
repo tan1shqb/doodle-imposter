@@ -130,7 +130,9 @@ function sameWord(a, b) {
   return x === y || strip(x) === strip(y);
 }
 
-/** Validate and shrink a drawing sent by a client. */
+const PALETTE_SIZE = 10; // colours in public/app.js PALETTE
+
+/** Validate and shrink a drawing sent by a client. Fill ops are `{ f: true, c, p: [[x, y]] }`. */
 function cleanStrokes(arr) {
   if (!Array.isArray(arr)) return [];
   const out = [];
@@ -146,9 +148,14 @@ function cleanStrokes(arr) {
       p.push([Math.round(clamp(x, 0, 1) * 10000) / 10000, Math.round(clamp(y, 0, 1) * 10000) / 10000]);
     }
     if (!p.length) continue;
+    const c = clamp(Math.floor(Number(s.c)) || 0, 0, PALETTE_SIZE - 1);
+    if (s.f) {
+      out.push({ f: true, c, p: p.slice(0, 1) });
+      continue;
+    }
     points += p.length;
     if (points > 20000) break;
-    out.push({ e: !!s.e, w: Math.round(clamp(Number(s.w) || 0.014, 0.003, 0.09) * 10000) / 10000, p });
+    out.push({ e: !!s.e, c, w: Math.round(clamp(Number(s.w) || 0.014, 0.003, 0.09) * 10000) / 10000, p });
   }
   return out;
 }

@@ -245,6 +245,16 @@ h1, h2, h3, p { margin: 0; }
 }
 .tool[aria-pressed='true'] { background: #d9ccff; border-width: 4px; }
 .tool:disabled { opacity: 0.5; }
+.draw { gap: 10px; }
+.draw .tools { gap: 6px; }
+.draw .tool { min-height: 56px; font-size: 15px; }
+.palette { display: flex; gap: 5px; }
+.swatch {
+  flex: 1; min-width: 0; height: 36px; padding: 0; cursor: pointer;
+  border: 3px solid var(--ink); border-radius: 50% 46% 52% 48% / 48% 52% 46% 50%;
+}
+.swatch[aria-pressed='true'] { box-shadow: 0 0 0 3px var(--paper), 0 0 0 6px var(--ink); transform: scale(0.86); }
+.swatch:focus-visible { outline: 3px solid var(--purple); outline-offset: 3px; }
 .sizes { display: flex; align-items: center; gap: 10px; font-size: 18px; }
 .size {
   width: 48px; height: 46px; display: flex; align-items: center; justify-content: center;

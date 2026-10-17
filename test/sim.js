@@ -175,11 +175,22 @@ async function main() {
     await allPhase(players, 'draw');
     ok(players.every((c) => c.raw.every((s) => !s.includes('"drawings"'))), 'no one sees drawings while drawing');
     const late = C;
+    const painted = [
+      { e: false, c: 2, w: 0.016, p: [[0.1, 0.1], [0.5, 0.5]] },
+      { f: true, c: 6, w: 0.5, e: true, p: [[0.3, 0.7], [0.4, 0.4]] },
+      { f: 1, c: 99, p: [[0.2, 0.2]] },
+      { e: false, c: 'red', w: 0.016, p: [[0.6, 0.6]] },
+    ];
     players.forEach((c, i) => {
       if (c === late) c.send({ t: 'drawing', strokes: [{ e: false, w: 0.02, p: [[0.9, 0.9]] }] });
+      else if (c === A) c.send({ t: 'drawing', strokes: painted, final: true });
       else c.send({ t: 'drawing', strokes: stroke(0.1 + i / 10), final: true });
     });
     await allPhase(players, 'reveal'); // timer ends the draw phase
+    const aOps = A.drawings.find((d) => d.id === A.state.you).strokes;
+    ok(aOps[0].c === 2 && !aOps[0].f, 'stroke colours survive the server');
+    ok(aOps[1].f === true && aOps[1].c === 6 && aOps[1].p.length === 1 && !('e' in aOps[1]) && !('w' in aOps[1]), 'fill ops keep one point and drop pen fields');
+    ok(aOps[2].c === 9 && aOps[3].c === 0, 'bad colours are clamped to the palette');
     ok(A.drawings && A.drawings.length === 4, 'all four drawings are revealed together');
     const lateDrawing = A.drawings.find((d) => d.id === late.state.you);
     ok(lateDrawing && lateDrawing.strokes.length === 1 && lateDrawing.strokes[0].p[0][0] === 0.9, 'a late player’s unsubmitted drawing is auto-submitted');

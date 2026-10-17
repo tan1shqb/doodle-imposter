@@ -7,6 +7,13 @@
   const COLORS = ['#FFC9A8', '#FFE08A', '#9FC3FF', '#D9B8FF', '#FFB3C7', '#A8E6C3', '#FFCF9E', '#B8E0F0'];
   const SIZES = [0.008, 0.016, 0.032];
   const SIZE_NAMES = ['Small brush', 'Medium brush', 'Large brush'];
+  // Paint colours. Strokes store the index (`c`), so keep the order and length in step with server.js.
+  const PALETTE = [INK, '#9E9E9E', '#E53935', '#FB8C00', '#FDD835', '#43A047', '#1E88E5', '#8E24AA', '#F48FB1', '#795548'];
+  const PALETTE_NAMES = ['Black', 'Grey', 'Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink', 'Brown'];
+  // Bucket fills are worked out on a fixed-size copy of the drawing so every screen fills the same area.
+  const FILL_W = 320;
+  const FILL_H = 400;
+  const FILL_TOL = 64;
 
   const $app = document.getElementById('app');
   const $toast = document.getElementById('toast');
@@ -41,7 +48,7 @@
     key: null,
     handle: null,
     name: store.get('di_name') || '',
-    ui: { round: -1, voteChoice: null, myStrokes: [], guessText: '', sizeIdx: 1, tool: 'pencil', codePrefill: urlRoom },
+    ui: { round: -1, voteChoice: null, myStrokes: [], guessText: '', sizeIdx: 1, colorIdx: 0, tool: 'pencil', codePrefill: urlRoom },
   };
   const nowMs = () => Date.now() + S.offset;
 
@@ -69,6 +76,8 @@
     pencil: '<path d="M4 20 L5 15 L16 4 L20 8 L9 19 Z M14 6 L18 10"/>',
     eraser: '<g transform="rotate(-40 12 12)"><rect x="3" y="8" width="18" height="9" rx="2"/><path d="M12 8 V17"/></g>',
     undo: '<path d="M9 7 L4 12 L9 17 M4 12 H15 Q21 12 21 18"/>',
+    redo: '<path d="M15 7 L20 12 L15 17 M20 12 H9 Q3 12 3 18"/>',
+    bucket: '<path d="M19 11 L11 3 L2.4 11.6 A2 2 0 0 0 2.4 14.4 L7.6 19.6 A2 2 0 0 0 10.4 19.6 Z M5 2 L10 7 M2 13 H17"/><path d="M22 20 A2 2 0 1 1 18 20 C18 18.4 19.7 17.6 20 16 C20.3 17.6 22 18.4 22 20 Z"/>',
     trash: '<path d="M5 7 H19 M9 7 V4 H15 V7 M7 7 L8 20 H16 L17 7 M10 11 V16 M14 11 V16"/>',
     clock: '<circle cx="12" cy="13" r="8"/><path d="M12 9 V13 L15 15 M9 3 H15"/>',
     lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11 V8 A4 4 0 0 1 16 8 V11"/>',
@@ -204,33 +213,137 @@
   }
 
   // ------------------------------------------------------------ drawing pad
+  const opColor = (s) => (s.e ? '#fff' : PALETTE[s.c] || INK);
+
+  /** One pen or eraser stroke. */
+  function drawOp(ctx, s, W, H) {
+    const col = opColor(s);
+    ctx.strokeStyle = col;
+    ctx.fillStyle = col;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = Math.max(1, s.w * W);
+    const p = s.p;
+    if (p.length === 1) {
+      ctx.beginPath();
+      ctx.arc(p[0][0] * W, p[0][1] * H, ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(p[0][0] * W, p[0][1] * H);
+    for (let i = 1; i < p.length - 1; i++) {
+      ctx.quadraticCurveTo(p[i][0] * W, p[i][1] * H, ((p[i][0] + p[i + 1][0]) / 2) * W, ((p[i][1] + p[i + 1][1]) / 2) * H);
+    }
+    const l = p[p.length - 1];
+    ctx.lineTo(l[0] * W, l[1] * H);
+    ctx.stroke();
+  }
+
+  // Fill results are cached per fill op as flat [y, x0, x1) spans at FILL_W x FILL_H.
+  // Ops are only ever pushed or popped at the end, so an op's earlier ops never change under it.
+  const fillCache = new WeakMap();
+  let refCtx = null;
+  let maskCtx = null;
+  let maskImg = null;
+  const ctx2d = (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    return c.getContext('2d', { willReadFrequently: true });
+  };
+  const hexRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+
+  /** Scanline flood fill from the op's point on the reference canvas. */
+  function floodSpans(ref, op) {
+    const W = FILL_W;
+    const H = FILL_H;
+    const d = ref.getImageData(0, 0, W, H).data;
+    const sx = Math.min(W - 1, Math.floor(op.p[0][0] * W));
+    const sy = Math.min(H - 1, Math.floor(op.p[0][1] * H));
+    const k0 = (sy * W + sx) * 4;
+    const r0 = d[k0];
+    const g0 = d[k0 + 1];
+    const b0 = d[k0 + 2];
+    const [fr, fg, fb] = hexRgb(opColor(op));
+    if (Math.max(Math.abs(fr - r0), Math.abs(fg - g0), Math.abs(fb - b0)) <= FILL_TOL) return []; // already that colour
+    const seen = new Uint8Array(W * H);
+    const match = (k) => !seen[k] && Math.abs(d[k * 4] - r0) <= FILL_TOL && Math.abs(d[k * 4 + 1] - g0) <= FILL_TOL && Math.abs(d[k * 4 + 2] - b0) <= FILL_TOL;
+    const spans = [];
+    const stack = [sx, sy];
+    while (stack.length) {
+      const y = stack.pop();
+      const x = stack.pop();
+      const row = y * W;
+      if (!match(row + x)) continue;
+      let l = x;
+      let r = x;
+      while (l > 0 && match(row + l - 1)) l--;
+      while (r < W - 1 && match(row + r + 1)) r++;
+      seen.fill(1, row + l, row + r + 1);
+      spans.push(y, l, r + 1);
+      for (const ny of [y - 1, y + 1]) {
+        if (ny < 0 || ny >= H) continue;
+        let run = false;
+        for (let nx = l; nx <= r; nx++) {
+          if (match(ny * W + nx)) {
+            if (!run) stack.push(nx, ny);
+            run = true;
+          } else run = false;
+        }
+      }
+    }
+    return spans;
+  }
+
+  /** A FILL_W x FILL_H canvas with just this fill painted on it. */
+  function fillMask(spans, color) {
+    if (!maskCtx) {
+      maskCtx = ctx2d(FILL_W, FILL_H);
+      maskImg = maskCtx.createImageData(FILL_W, FILL_H);
+    }
+    const d = maskImg.data;
+    d.fill(0);
+    const [r, g, b] = hexRgb(color);
+    for (let i = 0; i < spans.length; i += 3) {
+      for (let k = (spans[i] * FILL_W + spans[i + 1]) * 4, end = (spans[i] * FILL_W + spans[i + 2]) * 4; k < end; k += 4) {
+        d[k] = r;
+        d[k + 1] = g;
+        d[k + 2] = b;
+        d[k + 3] = 255;
+      }
+    }
+    maskCtx.putImageData(maskImg, 0, 0);
+    return maskCtx.canvas;
+  }
+
   function paintStrokes(ctx, strokes, W, H) {
     ctx.save();
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, W, H);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const s of strokes) {
-      const col = s.e ? '#fff' : INK;
-      ctx.strokeStyle = col;
-      ctx.fillStyle = col;
-      ctx.lineWidth = Math.max(1, s.w * W);
-      const p = s.p;
-      if (p.length === 1) {
-        ctx.beginPath();
-        ctx.arc(p[0][0] * W, p[0][1] * H, ctx.lineWidth / 2, 0, Math.PI * 2);
-        ctx.fill();
-        continue;
+    let ref = null; // fill-resolution copy, only kept up to date once a fill needs working out
+    strokes.forEach((s, i) => {
+      if (!s.f) {
+        drawOp(ctx, s, W, H);
+        if (ref) drawOp(ref, s, FILL_W, FILL_H);
+        return;
       }
-      ctx.beginPath();
-      ctx.moveTo(p[0][0] * W, p[0][1] * H);
-      for (let i = 1; i < p.length - 1; i++) {
-        ctx.quadraticCurveTo(p[i][0] * W, p[i][1] * H, ((p[i][0] + p[i + 1][0]) / 2) * W, ((p[i][1] + p[i + 1][1]) / 2) * H);
+      let spans = fillCache.get(s);
+      if (!spans) {
+        if (!ref) {
+          refCtx = refCtx || ctx2d(FILL_W, FILL_H);
+          ref = refCtx;
+          paintStrokes(ref, strokes.slice(0, i), FILL_W, FILL_H); // earlier fills are cached by now
+        }
+        spans = floodSpans(ref, s);
+        fillCache.set(s, spans);
       }
-      const l = p[p.length - 1];
-      ctx.lineTo(l[0] * W, l[1] * H);
-      ctx.stroke();
-    }
+      if (!spans.length) return;
+      const m = fillMask(spans, opColor(s));
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(m, 0, 0, W, H);
+      if (ref) ref.drawImage(m, 0, 0);
+    });
     ctx.restore();
   }
 
@@ -257,8 +370,9 @@
     const canvas = h('canvas', { class: 'pad', role: 'img', 'aria-label': 'Drawing canvas' });
     wrap.append(canvas);
     const ctx = canvas.getContext('2d');
-    const pad = { strokes: initial ? initial.slice() : [], tool: S.ui.tool, size: SIZES[S.ui.sizeIdx], onChange: null, canvas };
+    const pad = { strokes: initial ? initial.slice() : [], undone: [], tool: S.ui.tool, size: SIZES[S.ui.sizeIdx], color: S.ui.colorIdx, onChange: null, canvas };
     let cur = null;
+    let curId = null; // the one pointer drawing `cur`; other fingers and palms are ignored
     let W = 0;
     let H = 0;
 
@@ -290,7 +404,7 @@
       if (!ctx) return;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = cur.e ? '#fff' : INK;
+      ctx.strokeStyle = opColor(cur);
       ctx.lineWidth = Math.max(1, cur.w * W);
       ctx.beginPath();
       ctx.moveTo(a[0] * W, a[1] * H);
@@ -300,23 +414,40 @@
     function down(e) {
       if (e.button != null && e.button > 0) return;
       e.preventDefault();
+      if (cur) return;
       if (pad.strokes.length >= 380) { toast('That is a lot of strokes! Try undo or clear.'); return; }
-      try { canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      const eraser = pad.tool === 'eraser';
       const p = point(e);
-      cur = { e: eraser, w: eraser ? Math.min(0.09, pad.size * 2.5) : pad.size, p: [p] };
+      if (pad.tool === 'fill') {
+        const op = { f: true, c: pad.color, p: [p] };
+        pad.strokes.push(op);
+        redraw();
+        const spans = fillCache.get(op);
+        if (spans && !spans.length) { pad.strokes.pop(); return; } // tapped an area already that colour
+        pad.undone.length = 0;
+        if (pad.onChange) pad.onChange(pad.strokes);
+        return;
+      }
+      try { canvas.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      curId = e.pointerId;
+      const eraser = pad.tool === 'eraser';
+      cur = { e: eraser, c: pad.color, w: eraser ? Math.min(0.09, pad.size * 2.5) : pad.size, p: [p] };
       pad.strokes.push(cur);
+      pad.undone.length = 0;
       if (ctx) {
-        ctx.fillStyle = eraser ? '#fff' : INK;
+        ctx.fillStyle = opColor(cur);
         ctx.beginPath();
         ctx.arc(p[0] * W, p[1] * H, Math.max(1, cur.w * W) / 2, 0, Math.PI * 2);
         ctx.fill();
       }
     }
     function move(e) {
-      if (!cur) return;
+      if (!cur || e.pointerId !== curId) return;
       e.preventDefault();
-      const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      // Some in-app browsers return junk coalesced points (often 0,0), which draw a streak
+      // across the pad. They all happen within one frame, so drop any far from the real event.
+      const near = (ev) => Number.isFinite(ev.clientX) && Number.isFinite(ev.clientY)
+        && Math.abs(ev.clientX - e.clientX) < 48 && Math.abs(ev.clientY - e.clientY) < 48;
+      const evs = (e.getCoalescedEvents ? e.getCoalescedEvents() : []).filter(near);
       for (const ev of evs.length ? evs : [e]) {
         const p = point(ev);
         const last = cur.p[cur.p.length - 1];
@@ -325,9 +456,10 @@
         seg(last, p);
       }
     }
-    function up() {
-      if (!cur) return;
+    function up(e) {
+      if (!cur || e.pointerId !== curId) return;
       cur = null;
+      curId = null;
       if (pad.onChange) pad.onChange(pad.strokes);
     }
     canvas.addEventListener('pointerdown', down);
@@ -336,8 +468,10 @@
     canvas.addEventListener('pointercancel', up);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    pad.undo = () => { pad.strokes.pop(); redraw(); if (pad.onChange) pad.onChange(pad.strokes); };
-    pad.clear = () => { pad.strokes.length = 0; redraw(); if (pad.onChange) pad.onChange(pad.strokes); };
+    const changed = () => { redraw(); if (pad.onChange) pad.onChange(pad.strokes); };
+    pad.undo = () => { if (!cur && pad.strokes.length) { pad.undone.push(pad.strokes.pop()); changed(); } };
+    pad.redo = () => { if (!cur && pad.undone.length) { pad.strokes.push(pad.undone.pop()); changed(); } };
+    pad.clear = () => { pad.strokes.length = 0; pad.undone.length = 0; changed(); };
     let ro = null;
     if ('ResizeObserver' in window) { ro = new ResizeObserver(layout); ro.observe(wrap); }
     else requestAnimationFrame(layout);
@@ -625,6 +759,7 @@
 
     const sendDraft = () => { lastSent = Date.now(); send({ t: 'drawing', strokes: pad.strokes }); };
     pad.onChange = () => {
+      syncHistory();
       S.ui.myStrokes = pad.strokes.slice();
       if (tmr) return;
       tmr = setTimeout(() => { tmr = null; if (!submitted) sendDraft(); }, Math.max(0, 1500 - (Date.now() - lastSent)));
@@ -641,14 +776,33 @@
 
     const tools = {};
     const sizes = [];
+    const swatches = [];
     const setTool = (t) => {
       pad.tool = S.ui.tool = t;
-      tools.pencil.setAttribute('aria-pressed', String(t === 'pencil'));
-      tools.eraser.setAttribute('aria-pressed', String(t === 'eraser'));
+      for (const [k, b] of Object.entries(tools)) b.setAttribute('aria-pressed', String(k === t));
     };
     const toolBtn = (key, ico, label, onClick) => {
       const b = h('button', { class: 'tool', type: 'button', 'aria-pressed': 'false', onClick }, icon(ico, 28), label);
       tools[key] = b;
+      return b;
+    };
+    const actBtn = (ico, label, onClick) => h('button', { class: 'tool', type: 'button', onClick }, icon(ico, 28), label);
+    const undoBtn = actBtn('undo', 'Undo', () => pad.undo());
+    const redoBtn = actBtn('redo', 'Redo', () => pad.redo());
+    const syncHistory = () => {
+      undoBtn.disabled = !pad.strokes.length;
+      redoBtn.disabled = !pad.undone.length;
+    };
+    const setColor = (i, keepTool) => {
+      pad.color = S.ui.colorIdx = i;
+      swatches.forEach((b, j) => b.setAttribute('aria-pressed', String(i === j)));
+      sizes.forEach((b) => { b.firstChild.style.background = PALETTE[i]; });
+      if (!keepTool && pad.tool === 'eraser') setTool('pencil');
+    };
+    const swatch = (i) => {
+      const b = h('button', { class: 'swatch', type: 'button', 'aria-label': PALETTE_NAMES[i], 'aria-pressed': 'false', onClick: () => setColor(i) });
+      b.style.background = PALETTE[i];
+      swatches.push(b);
       return b;
     };
     const sizeBtn = (i) => {
@@ -656,13 +810,14 @@
         S.ui.sizeIdx = i;
         pad.size = SIZES[i];
         sizes.forEach((s, j) => s.setAttribute('aria-pressed', String(i === j)));
+        if (pad.tool === 'fill') setTool('pencil');
       } }, h('i'));
       b.firstChild.style.width = b.firstChild.style.height = `${[6, 12, 20][i]}px`;
       sizes.push(b);
       return b;
     };
 
-    root.append(screenEl('fit',
+    root.append(screenEl('fit draw',
       h('div', { class: 'row between' },
         h('h1', { class: 'h1 left', text: 'Draw your answer' }),
         timerPill(st.room.deadline)),
@@ -670,12 +825,17 @@
       wrap,
       h('div', { class: 'tools' },
         toolBtn('pencil', 'pencil', 'Pencil', () => setTool('pencil')),
+        toolBtn('fill', 'bucket', 'Fill', () => setTool('fill')),
         toolBtn('eraser', 'eraser', 'Eraser', () => setTool('eraser')),
-        h('button', { class: 'tool', type: 'button', onClick: () => pad.undo() }, icon('undo', 28), 'Undo'),
-        h('button', { class: 'tool', type: 'button', onClick: () => { if (!pad.strokes.length || confirm('Clear your whole drawing?')) pad.clear(); } }, icon('trash', 28), 'Clear')),
+        undoBtn,
+        redoBtn,
+        actBtn('trash', 'Clear', () => { if (!pad.strokes.length || confirm('Clear your whole drawing?')) pad.clear(); })),
+      h('div', { class: 'palette', role: 'group', 'aria-label': 'Colours' }, PALETTE.map((_, i) => swatch(i))),
       h('div', { class: 'sizes' }, 'Brush size', sizeBtn(0), sizeBtn(1), sizeBtn(2)),
       btn('Submit drawing', submit)));
     setTool(S.ui.tool);
+    setColor(S.ui.colorIdx, true);
+    syncHistory();
 
     return {
       update(s) { cur = s; },
