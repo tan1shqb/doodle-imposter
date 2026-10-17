@@ -56,6 +56,21 @@ screenshots of the key screens.
 - If the imposter leaves, the round is cancelled back to the lobby. If fewer than 3 players are left,
   the game ends and everyone returns to the home screen.
 
+## Languages
+
+Each player picks their language on the home screen (English, Español, Français, Deutsch, Italiano,
+العربية, 中文, 日本語); it starts as the phone's language and is remembered on that phone. Everyone
+in a room can use a different language: the server sends every prompt in all eight, and each phone
+shows its own. The imposter's last guess counts in any of the languages, ignoring case and accents.
+Arabic switches the layout to right-to-left, and Arabic, Chinese and Japanese load a matching font.
+
+- Interface text lives in `public/i18n.js`, one block per language. Messages from the server carry
+  a code (the `srv.*` keys) so each phone can show them in its own language.
+- Prompts in `prompts.js` hold all eight languages on one line per pair.
+- `npm test` fails if a language is missing a text or a prompt, or a placeholder like `{name}`.
+- The translations were written without native-speaker review, so have a native speaker check them
+  before relying on them.
+
 ## Sound and vibration
 
 Short synthesised beeps (no audio files) for the 10-second warning, the last five seconds of the
@@ -80,6 +95,7 @@ Timers can be changed with environment variables (milliseconds): `DI_READY_MS` (
 ## Files
 
 - `server.js` game rooms, rules, and WebSocket protocol
-- `prompts.js` the word list (`{ category, word, hint }`); add your own here
+- `prompts.js` the word list (`{ category, word, hint }` in every language); add your own here
+- `public/i18n.js` the interface text in every language
 - `public/` the phone UI (`index.html`, `style.css`, `app.js`) and the QR library in `vendor/`
 - `test/sim.js` multiplayer simulation

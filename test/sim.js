@@ -6,9 +6,17 @@
  */
 const { spawn } = require('child_process');
 const path = require('path');
+const vm = require('vm');
 const WebSocket = require('ws');
 
 const PORT = 3111;
+const PROMPTS = require('../prompts');
+const I18N = (() => {
+  const ctx = { window: {} };
+  vm.runInNewContext(require('fs').readFileSync(path.join(__dirname, '..', 'public', 'i18n.js'), 'utf8'), ctx);
+  return ctx.window.DI_I18N;
+})();
+const LANGS = I18N.langs.map(([code]) => code);
 let failures = 0;
 const ok = (cond, msg) => {
   if (cond) console.log(`  ✓ ${msg}`);
@@ -120,6 +128,26 @@ async function main() {
   };
 
   try {
+    // ------------------------------------------------------ languages
+    console.log('Languages');
+    const ok8 = (o) => o && LANGS.every((l) => typeof o[l] === 'string' && o[l].trim());
+    ok(PROMPTS.length === 100 && PROMPTS.every((p) => ok8(p.word) && ok8(p.hint) && ok8(p.category)), `all ${PROMPTS.length} prompts have a word, hint and category in all ${LANGS.length} languages`);
+    ok(PROMPTS.every((p) => LANGS.every((l) => p.word[l] !== p.hint[l])), 'no prompt’s hint is the same as its word, in any language');
+    const base = (k) => k.replace(/_(zero|one|two|few|many|other)$/, '');
+    const holes = (s) => [...new Set(s.match(/\{\w+\}/g) || [])].filter((x) => x !== '{n}').sort().join();
+    const en = I18N.strings.en;
+    const gaps = [];
+    for (const l of LANGS) {
+      const tb = I18N.strings[l];
+      for (const k of Object.keys(en)) if (!Object.keys(tb).some((x) => base(x) === base(k))) gaps.push(`${l} lacks ${k}`);
+      for (const [k, v] of Object.entries(tb)) {
+        const ref = en[k] ?? en[`${base(k)}_other`];
+        if (ref == null) gaps.push(`${l} has unknown ${k}`);
+        else if (holes(v) !== holes(ref)) gaps.push(`${l} ${k} placeholders`);
+      }
+    }
+    ok(!gaps.length, `every interface text exists in every language with the same placeholders${gaps.length ? `: ${gaps.slice(0, 5).join('; ')}` : ''}`);
+
     // ------------------------------------------------------------ HTTP
     console.log('Static files');
     const home = await fetch(`http://localhost:${PORT}/`);
@@ -186,8 +214,9 @@ async function main() {
     ok(players.filter((c) => c.state.secret.role === 'imposter').length === 1, 'exactly one imposter');
     ok(imp.state.secret.hint && !imp.state.secret.word && !imp.state.secret.category, 'imposter gets a hint and no word');
     ok(normals.every((c) => c.state.secret.word && c.state.secret.category), 'everyone else gets the category and word');
-    const word = normals[0].state.secret.word;
-    ok(imp.raw.every((s) => !s.includes(`"word":"${word}"`)), 'the word never reached the imposter');
+    const word = normals[0].state.secret.word; // { en, es, ... }
+    ok(Object.values(word).every((w) => imp.raw.every((s) => !s.includes(JSON.stringify(w)))), 'the word never reached the imposter, in any language');
+    ok(LANGS.every((l) => word[l] && imp.state.secret.hint[l]), 'the word and hint come in every language');
     ok(players.every((c) => c.raw.every((s) => !s.includes('imposterId'))), 'imposter identity is never sent during play');
     players.forEach((c) => c.send({ t: 'ready' }));
     await allPhase(players, 'draw');
@@ -225,7 +254,7 @@ async function main() {
     await allPhase(players, 'results');
     let res = A.state.result;
     ok(res.caught && res.winner === 'players' && res.reason === 'guesswrong', 'wrong guess means the players win');
-    ok(res.word === word && res.imposters.length === 1 && res.imposters[0].id === imp.state.you, 'results reveal the word and the imposter');
+    ok(res.word.en === word.en && res.imposters.length === 1 && res.imposters[0].id === imp.state.you, 'results reveal the word and the imposter');
     ok(res.tally[0].id === imp.state.you && res.tally[0].count === 3, 'vote tally is correct (3 votes)');
 
     // --------------------------------------------------- round 2: tie
@@ -249,7 +278,7 @@ async function main() {
     const word3 = secretOf(norm3[0]).word;
     players.forEach((c) => c.send({ t: 'vote', target: c === imp3 ? norm3[0].state.you : imp3.state.you }));
     await allPhase(players, 'guess');
-    imp3.send({ t: 'guess', word: ` ${word3.toUpperCase()} ` });
+    imp3.send({ t: 'guess', word: ` ${word3.en.toUpperCase()} ` });
     await allPhase(players, 'results');
     res = A.state.result;
     ok(res.winner === 'imposter' && res.reason === 'guessright', 'a correct guess (any case) steals the win');
@@ -495,9 +524,9 @@ async function main() {
     mr = await playMulti((c, imps, inn) => (imps.includes(c) ? inn.slice(0, 2) : imps));
     await allPhase(M, 'guess');
     const mWord = secretOf(mr.inn[0]).word;
-    mr.imps[1].send({ t: 'guess', word: mWord });
+    mr.imps[1].send({ t: 'guess', word: mWord.ja }); // a guess in another language counts too
     await allPhase(M, 'results');
-    ok(M[0].state.result.reason === 'guessright' && M[0].state.result.winner === 'imposter', 'one right guess steals the win for all the imposters');
+    ok(M[0].state.result.reason === 'guessright' && M[0].state.result.winner === 'imposter', 'one right guess (here in Japanese) steals the win for all the imposters');
 
     mr = await playMulti((c, imps, inn) => {
       // imposter 0 and innocent 1 get 3 votes each; nobody else gets more than 2, so they are the accused

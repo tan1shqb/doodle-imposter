@@ -6,12 +6,10 @@
   const INK = '#1E1A2E';
   const COLORS = ['#FFC9A8', '#FFE08A', '#9FC3FF', '#D9B8FF', '#FFB3C7', '#A8E6C3', '#FFCF9E', '#B8E0F0', '#D4EE8E', '#FF9E9E'];
   const SIZES = [0.008, 0.016, 0.032];
-  const SIZE_NAMES = ['Small brush', 'Medium brush', 'Large brush'];
   // Paint colours. Strokes store the index (`c`), so keep the order and length in step with server.js.
   const PALETTE = [INK, '#9E9E9E', '#E53935', '#FB8C00', '#FDD835', '#43A047', '#1E88E5', '#8E24AA', '#F48FB1', '#795548'];
-  const PALETTE_NAMES = ['Black', 'Grey', 'Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink', 'Brown'];
   // Reveal-screen reactions. The server only knows them by index, so keep the length in step with server.js.
-  const REACTIONS = [['😂', 'Funny'], ['😭', 'Crying'], ['❤️', 'Love'], ['👍', 'Thumbs up']];
+  const REACTIONS = ['😂', '😭', '❤️', '👍']; // their names are react.0-3 in i18n.js
   // Bucket fills are worked out on a fixed-size copy of the drawing so every screen fills the same area.
   const FILL_W = 320;
   const FILL_H = 400;
@@ -73,6 +71,66 @@
     return el;
   }
 
+  // --------------------------------------------------------------- language
+  // Each phone picks its own language; the text lives in i18n.js and prompts carry every language.
+  const I18N = window.DI_I18N;
+  const LANGS = I18N.langs.map(([code]) => code);
+  const FONTS = { ar: 'Baloo+Bhaijaan+2:wght@400;700', zh: 'ZCOOL+KuaiLe', ja: 'Yusei+Magic' }; // scripts the doodle fonts lack
+  function startLang() {
+    const saved = store.get('di_lang');
+    if (LANGS.includes(saved)) return saved;
+    for (const l of navigator.languages || [navigator.language || '']) {
+      const base = String(l).toLowerCase().split('-')[0];
+      if (LANGS.includes(base)) return base;
+    }
+    return 'en';
+  }
+  let lang = startLang();
+  let plurals = new Intl.PluralRules(lang);
+
+  /** Interface text for `key`, with {placeholders} filled in from `p`. When the key has plural forms, p.n picks one. */
+  function t(key, p = {}) {
+    const en = I18N.strings.en;
+    const keys = `${key}_other` in en ? [`${key}_${plurals.select(Number(p.n))}`, `${key}_other`] : [key];
+    const pick = (tbl) => keys.map((k) => tbl[k]).find((v) => v != null);
+    const text = pick(I18N.strings[lang]) ?? pick(en) ?? key;
+    return text.replace(/\{(\w+)\}/g, (m, x) => (x in p ? String(p[x]) : m));
+  }
+  /** Like t(), but a placeholder may be a DOM node (a live timer, a bold word). Returns nodes and strings. */
+  function tn(key, p = {}) {
+    const marked = Object.fromEntries(Object.entries(p).map(([k, v]) => [k, v && v.nodeType ? `\u0000${k}\u0000` : v]));
+    return t(key, marked).split('\u0000').map((part, i) => (i % 2 ? p[part] : part)).filter((x) => x !== '');
+  }
+  /** A prompt field ({ en, es, ... }) in this phone's language. */
+  const loc = (o) => (o && typeof o === 'object' ? o[lang] || o.en : o || '');
+  /** A server message in this phone's language, falling back to the server's English. */
+  function srvText(m) {
+    const key = `srv.${m.code}`;
+    const en = I18N.strings.en;
+    if (!m.code || !(key in en || `${key}_other` in en)) return m.message || '';
+    const p = m.params || {};
+    return p.vote ? `${t(key, p)} ${t('srv.vote_again')}` : t(key, p);
+  }
+  function applyLang() {
+    const root = document.documentElement;
+    root.lang = lang;
+    root.dir = I18N.rtl.includes(lang) ? 'rtl' : 'ltr';
+    if (FONTS[lang] && !document.getElementById(`font-${lang}`)) {
+      document.head.append(h('link', { id: `font-${lang}`, rel: 'stylesheet', href: `https://fonts.googleapis.com/css2?family=${FONTS[lang]}&display=swap` }));
+    }
+    $conn.textContent = t('reconnecting');
+  }
+  function setLang(code) {
+    if (!LANGS.includes(code)) return;
+    lang = code;
+    plurals = new Intl.PluralRules(lang);
+    store.set('di_lang', code);
+    applyLang();
+    S.key = null; // rebuild the screen in the new language
+    route();
+  }
+  applyLang();
+
   const ICONS = {
     back: '<path d="M20 12 H5 M11 5 L4 12 L11 19"/>',
     pencil: '<path d="M4 20 L5 15 L16 4 L20 8 L9 19 Z M14 6 L18 10"/>',
@@ -91,6 +149,7 @@
     x: '<path d="M6 6 L18 18 M18 6 L6 18"/>',
     sound: '<path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/><path d="M16 9 Q18 12 16 15 M19 6 Q23 12 19 18"/>',
     mute: '<path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/><path d="M16 9 L22 15 M22 9 L16 15"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12 H21 M12 3 Q16.5 7.5 16.5 12 Q16.5 16.5 12 21 Q7.5 16.5 7.5 12 Q7.5 7.5 12 3 Z"/>',
     hat: '<path d="M5 11 L7 4 H17 L19 11 Z"/><path d="M3 11 H21"/><circle cx="8" cy="17" r="3"/><circle cx="16" cy="17" r="3"/><path d="M11 17 H13"/>',
   };
   function icon(name, size = 24, color = INK) {
@@ -104,6 +163,7 @@
     s.setAttribute('stroke-linecap', 'round');
     s.setAttribute('stroke-linejoin', 'round');
     s.setAttribute('aria-hidden', 'true');
+    s.setAttribute('class', `i-${name}`);
     s.innerHTML = ICONS[name]; // static, trusted strings only
     return s;
   }
@@ -204,7 +264,7 @@
   function header(title, onBack, right) {
     return h('div', { class: 'row' },
       onBack
-        ? h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Back', onClick: onBack }, icon('back', 30))
+        ? h('button', { class: 'icon-btn', type: 'button', 'aria-label': t('back'), onClick: onBack }, icon('back', 30))
         : h('div', null),
       h('h1', { class: 'h1 grow', text: title }),
       right || h('div', { class: 'icon-btn' }));
@@ -213,7 +273,7 @@
     const b = h('button', { class: 'icon-btn', type: 'button' });
     const paint = () => {
       b.replaceChildren(icon(sound.on ? 'sound' : 'mute', 28));
-      b.setAttribute('aria-label', 'Sound and vibration');
+      b.setAttribute('aria-label', t('sound'));
       b.setAttribute('aria-pressed', String(sound.on));
     };
     b.addEventListener('click', () => { sound.toggle(); paint(); sound.play('tick', 25); });
@@ -231,7 +291,7 @@
       if (prev && prev.focus) prev.focus();
     };
     const onKey = (e) => { if (e.key === 'Escape') close(); };
-    const closeBtn = btn('Close', close, { secondary: true });
+    const closeBtn = btn(t('close'), close, { secondary: true });
     const overlay = h('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', onClick: (e) => { if (e.target === overlay) close(); } },
       h('div', { class: 'sheet' }, ...children, closeBtn));
     document.body.append(overlay);
@@ -251,33 +311,33 @@
       src = qr.createDataURL(8, 2);
     } catch { /* fall through */ }
     openSheet([
-      h('div', { class: 'h2', text: 'Scan to join' }),
-      src ? h('img', { class: 'qr', src, alt: `QR code to join room ${code}` }) : h('p', { text: 'Could not draw the QR code.' }),
+      h('div', { class: 'h2', text: t('qr.title') }),
+      src ? h('img', { class: 'qr', src, alt: t('qr.alt', { code }) }) : h('p', { text: t('qr.fail') }),
       h('div', { class: 'label', text: code }),
-      h('p', { class: 'small center', text: 'Point a phone camera at this code to open the game.' }),
+      h('p', { class: 'small center', text: t('qr.hint') }),
     ]);
   }
 
   function copyText(text) {
     const fallback = () => {
-      const t = h('textarea', { 'aria-hidden': 'true' });
-      t.value = text;
-      document.body.append(t);
-      t.select();
+      const ta = h('textarea', { 'aria-hidden': 'true' });
+      ta.value = text;
+      document.body.append(ta);
+      ta.select();
       let ok = false;
       try { ok = document.execCommand('copy'); } catch { /* ignore */ }
-      t.remove();
-      toast(ok ? 'Link copied' : `Share this link: ${text}`);
+      ta.remove();
+      toast(ok ? t('share.copied') : t('share.manual', { url: text }));
     };
     if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(() => toast('Link copied'), fallback);
+      navigator.clipboard.writeText(text).then(() => toast(t('share.copied')), fallback);
     } else fallback();
   }
   async function shareLink(code) {
     const url = shareUrl(code);
     if (navigator.share) {
       try {
-        await navigator.share({ title: 'Doodle Imposter', text: `Join my Doodle Imposter game! Room code ${code}`, url });
+        await navigator.share({ title: 'Doodle Imposter', text: t('share.text', { code }), url });
         return;
       } catch (e) {
         if (e && e.name === 'AbortError') return;
@@ -423,7 +483,7 @@
 
   /** A read-only drawing at whatever size its box ends up (4:5 ratio). */
   function thumb(strokes) {
-    const c = h('canvas', { class: 'thumb', role: 'img', 'aria-label': 'Drawing' });
+    const c = h('canvas', { class: 'thumb', role: 'img', 'aria-label': t('pad.drawing') });
     const paint = () => {
       const w = c.clientWidth;
       if (!w) return;
@@ -441,7 +501,7 @@
 
   /** The live canvas. Coordinates are stored as 0..1 of the canvas size. */
   function createPad(wrap, initial) {
-    const canvas = h('canvas', { class: 'pad', role: 'img', 'aria-label': 'Drawing canvas' });
+    const canvas = h('canvas', { class: 'pad', role: 'img', 'aria-label': t('pad.canvas') });
     wrap.append(canvas);
     const ctx = canvas.getContext('2d');
     const pad = { strokes: initial ? initial.slice() : [], undone: [], tool: S.ui.tool, size: SIZES[S.ui.sizeIdx], color: S.ui.colorIdx, onChange: null, canvas };
@@ -489,7 +549,7 @@
       if (e.button != null && e.button > 0) return;
       e.preventDefault();
       if (cur) return;
-      if (pad.strokes.length >= 380) { toast('That is a lot of strokes! Try undo or clear.'); return; }
+      if (pad.strokes.length >= 380) { toast(t('pad.tooMany')); return; }
       const p = point(e);
       if (pad.tool === 'fill') {
         const op = { f: true, c: pad.color, p: [p] };
@@ -574,7 +634,7 @@
     ws.onclose = (e) => {
       S.open = false;
       if (S.everOpen) $conn.hidden = false;
-      if (e.code === 4000) { toast('This game is open in another tab.'); return; }
+      if (e.code === 4000) { toast(t('otherTab')); return; }
       setTimeout(connect, Math.min(4000, 400 * 2 ** S.retry++));
     };
     ws.onerror = () => {};
@@ -619,14 +679,14 @@
         if (S.handle && S.handle.renderList) S.handle.renderList();
         break;
       case 'notice':
-        toast(m.message);
+        toast(srvText(m));
         break;
       case 'error':
         if (m.code === 'rejoin_failed') {
           clearSession();
           S.local = urlRoom ? 'join' : 'home';
           route();
-        } else toast(m.message);
+        } else toast(srvText(m));
         break;
       case 'left':
         clearSession();
@@ -636,7 +696,7 @@
       case 'ended':
         clearSession();
         route();
-        toast(m.t === 'kicked' ? 'The host removed you from the lobby.' : m.message);
+        toast(m.t === 'kicked' ? t('kicked') : srvText(m));
         break;
       default:
     }
@@ -658,15 +718,15 @@
   const playing = (p) => p.connected && !p.waiting; // in this round and online
   const connectedCount = (st) => st.room.players.filter(playing).length;
   const maxImposters = (n) => Math.max(1, Math.floor((n - 1) / 2)); // innocents always outnumber imposters, as on the server
-  const imposterWord = (n) => (n > 1 ? `${n} imposters` : '1 imposter');
+  const imposterWord = (n) => t('imposters', { n });
 
   function statusList(st, key, doneText, waitText) {
     return h('div', { class: 'plist' }, st.room.players.map((p) => {
       const done = p[key];
       return h('div', { class: 'prow' },
         avatar(p.color),
-        h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
-        h('span', { class: `st${done ? ' ok' : ''}`, text: p.waiting ? 'next round' : !p.connected ? 'away' : done ? `✓ ${doneText}` : waitText }));
+        h('span', { class: 'grow', text: p.id === st.you ? t('you', { name: p.name }) : p.name }),
+        h('span', { class: `st${done ? ' ok' : ''}`, text: p.waiting ? t('st.nextRound') : !p.connected ? t('st.away') : done ? `✓ ${doneText}` : waitText }));
     }));
   }
 
@@ -684,43 +744,58 @@
       <g transform="translate(232 62) scale(0.92)"><g fill="#FFFDF8" stroke="#1E1A2E" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M28 40 L26 16 L43 29 Q50 27 57 29 L74 16 L72 40 Q77 53 66 61 Q50 69 34 61 Q23 53 28 40 Z"/><path d="M36 62 Q29 84 40 93 L60 93 Q71 84 64 62"/><path d="M66 86 Q90 88 85 62" fill="none"/><path d="M30 50 L14 47 M30 55 L14 58 M70 50 L86 47 M70 55 L86 58" fill="none"/></g><circle cx="41" cy="44" r="2.6" fill="#1E1A2E"/><circle cx="59" cy="44" r="2.6" fill="#1E1A2E"/><path d="M47.5 50 L52.5 50 L50 53.5 Z" fill="#1E1A2E"/></g>
     </svg>`;
     root.append(screenEl('',
+      h('div', { class: 'row end' }, langPicker()),
       h('div', { class: 'spacer' }),
       h('h1', { class: 'logo' }, h('span', { class: 'l1', text: 'DOODLE' }), h('span', { class: 'l2', text: 'IMPOSTER' })),
-      h('p', { class: 'tagline', text: 'Draw carefully. Trust nobody.' }),
+      h('p', { class: 'tagline', text: t('home.tagline') }),
       art,
       h('div', { class: 'spacer' }),
-      btn('Create game', () => { S.local = 'create'; route(); }),
-      btn('Join game', () => { S.local = 'join'; route(); }, { secondary: true }),
-      h('p', { class: 'small center', text: '3–10 players · no account needed' })));
+      btn(t('home.create'), () => { S.local = 'create'; route(); }),
+      btn(t('home.join'), () => { S.local = 'join'; route(); }, { secondary: true }),
+      h('p', { class: 'small center', text: t('home.foot') })));
   };
+
+  /** The language button on the home screen: each language is listed in its own script. */
+  function langPicker() {
+    const name = I18N.langs.find(([code]) => code === lang)[1];
+    return h('button', { class: 'lang-btn', type: 'button', 'aria-label': `${t('language')}: ${name}`, onClick: () => {
+      const close = openSheet([
+        h('div', { class: 'h2', text: t('language') }),
+        h('div', { class: 'lang-list' }, I18N.langs.map(([code, label]) => h('button', {
+          class: 'lang-opt', type: 'button', lang: code, 'aria-pressed': String(code === lang),
+          onClick: () => { close(); setLang(code); },
+        }, label))),
+      ]);
+    } }, icon('globe', 24), name);
+  }
 
   // ----- create
   screens.create = (root) => {
     setBg('#FFF6E5');
-    const name = h('input', { class: 'input', id: 'cn', type: 'text', maxlength: 14, value: S.name, autocomplete: 'nickname', placeholder: 'e.g. Sophie' });
+    const name = h('input', { class: 'input', id: 'cn', type: 'text', maxlength: 14, value: S.name, autocomplete: 'nickname', placeholder: t('create.placeholder') });
     const pub = h('input', { type: 'checkbox', id: 'cp' });
     const go = () => {
       const n = name.value.trim();
-      if (!n) { toast('Enter your name first'); name.focus(); return; }
+      if (!n) { toast(t('name.empty')); name.focus(); return; }
       S.name = n;
       store.set('di_name', n);
       send({ t: 'create', name: n, public: pub.checked });
     };
     name.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
     root.append(screenEl('',
-      header('New game', () => { S.local = 'home'; route(); }),
-      h('div', { class: 'col' }, h('label', { class: 'label', for: 'cn', text: 'Your name' }), name),
-      h('label', { class: 'check', for: 'cp' }, pub, 'Show in the public lobby list'),
-      h('p', { class: 'note', text: 'Leave this off and only people with your code or QR can join.' }),
+      header(t('create.title'), () => { S.local = 'home'; route(); }),
+      h('div', { class: 'col' }, h('label', { class: 'label', for: 'cn', text: t('name.label') }), name),
+      h('label', { class: 'check', for: 'cp' }, pub, t('create.public')),
+      h('p', { class: 'note', text: t('create.privateNote') }),
       h('div', { class: 'spacer' }),
-      btn('Create game', go)));
+      btn(t('home.create'), go)));
     setTimeout(() => { if (!name.value) name.focus(); }, 50);
   };
 
   // ----- join (enter a code, or pick a public lobby)
   screens.join = (root) => {
     setBg('#FFF6E5');
-    const name = h('input', { class: 'input', id: 'jn', type: 'text', maxlength: 14, value: S.name, autocomplete: 'nickname', placeholder: 'e.g. Maya' });
+    const name = h('input', { class: 'input', id: 'jn', type: 'text', maxlength: 14, value: S.name, autocomplete: 'nickname', placeholder: t('join.placeholder') });
     const code = h('input', {
       class: 'input code', id: 'jc', type: 'text', maxlength: 8, value: S.ui.codePrefill || '',
       autocapitalize: 'characters', autocomplete: 'off', spellcheck: 'false', placeholder: 'A7K92',
@@ -728,8 +803,8 @@
     code.addEventListener('input', () => { code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
     const doJoin = (c) => {
       const n = name.value.trim();
-      if (!n) { toast('Enter your name first'); name.focus(); return; }
-      if (!c) { toast('Enter a room code'); code.focus(); return; }
+      if (!n) { toast(t('name.empty')); name.focus(); return; }
+      if (!c) { toast(t('join.noCode')); code.focus(); return; }
       S.name = n;
       store.set('di_name', n);
       send({ t: 'join', code: c, name: n });
@@ -740,16 +815,16 @@
     function renderList() {
       list.replaceChildren();
       if (!S.lobbies.length) {
-        list.append(h('p', { class: 'note', text: 'No public lobbies right now. Create one, or enter a code.' }));
+        list.append(h('p', { class: 'note', text: t('join.none') }));
         return;
       }
       for (const l of S.lobbies) {
         list.append(h('div', { class: 'card row' },
           avatar(l.color),
           h('div', { class: 'grow' },
-            h('div', { class: 'h2', text: `${l.host}'s game` }),
-            h('div', { class: 'st small' }, h('span', { class: 'dot' }), ` ${l.players}/${l.max} players · ${l.playing ? 'Playing, join for next round' : 'Waiting'}`)),
-          h('button', { class: 'btn small-btn', type: 'button', 'aria-label': `Join ${l.host}'s game`, onClick: () => doJoin(l.code) }, 'Join')));
+            h('div', { class: 'h2', text: t('join.hostGame', { name: l.host }) }),
+            h('div', { class: 'st small' }, h('span', { class: 'dot' }), ` ${t('join.count', { count: l.players, max: l.max })} · ${l.playing ? t('join.playing') : t('join.waiting')}`)),
+          h('button', { class: 'btn small-btn', type: 'button', 'aria-label': t('join.joinHost', { name: l.host }), onClick: () => doJoin(l.code) }, t('join.btn'))));
       }
     }
     renderList();
@@ -757,16 +832,16 @@
     const timer = setInterval(() => send({ t: 'list' }), 5000);
 
     root.append(screenEl('',
-      header('Join a game', () => { S.local = 'home'; route(); }),
-      h('div', { class: 'col' }, h('label', { class: 'label', for: 'jn', text: 'Your name' }), name),
+      header(t('join.title'), () => { S.local = 'home'; route(); }),
+      h('div', { class: 'col' }, h('label', { class: 'label', for: 'jn', text: t('name.label') }), name),
       h('div', { class: 'panel col' },
-        h('label', { class: 'label', for: 'jc', text: 'Have a room code?' }),
-        h('div', { class: 'row' }, h('div', { class: 'grow' }, code), h('button', { class: 'btn small-btn', type: 'button', onClick: () => doJoin(code.value) }, 'Join')),
-        h('p', { class: 'small', text: 'Tip: scanning the host’s QR code with your camera fills this in for you.' })),
-      h('div', { class: 'divider', text: 'or jump into a public lobby' }),
+        h('label', { class: 'label', for: 'jc', text: t('join.haveCode') }),
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, code), h('button', { class: 'btn small-btn', type: 'button', onClick: () => doJoin(code.value) }, t('join.btn'))),
+        h('p', { class: 'small', text: t('join.tip') })),
+      h('div', { class: 'divider', text: t('join.or') }),
       h('div', { class: 'row between' },
-        h('h2', { class: 'h2', text: 'Public lobbies' }),
-        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => send({ t: 'list' }) }, icon('refresh', 20), 'Refresh')),
+        h('h2', { class: 'h2', text: t('join.public') }),
+        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => send({ t: 'list' }) }, icon('refresh', 20), t('join.refresh'))),
       list));
     return { renderList, destroy: () => clearInterval(timer) };
   };
@@ -778,37 +853,37 @@
     const isHost = r.host === st.you;
     const ready = connectedCount(st) >= r.min;
     root.append(screenEl('',
-      header('Game Lobby', leaveGame, soundBtn()),
-      h('p', { class: 'sub', text: 'Share this code with your friends' }),
+      header(t('lobby.title'), leaveGame, soundBtn()),
+      h('p', { class: 'sub', text: t('lobby.share') }),
       h('div', { class: 'panel center' },
-        h('div', { class: 'big-word code-big', text: r.code, 'aria-label': `Room code ${r.code.split('').join(' ')}` }),
-        h('div', { class: 'caps small', text: 'Room code' })),
+        h('div', { class: 'big-word code-big', text: r.code, 'aria-label': t('lobby.codeAria', { code: r.code.split('').join(' ') }) }),
+        h('div', { class: 'caps small', text: t('lobby.code') })),
       h('div', { class: 'row' },
-        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => showQr(r.code) }, icon('qr', 22), 'Show QR'),
-        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => shareLink(r.code) }, icon('share', 22), 'Share link')),
-      h('h2', { class: 'h2', text: `Players (${r.players.length}/${r.max})` }),
+        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => showQr(r.code) }, icon('qr', 22), t('lobby.qr')),
+        h('button', { class: 'btn secondary small-btn', type: 'button', onClick: () => shareLink(r.code) }, icon('share', 22), t('lobby.link'))),
+      h('h2', { class: 'h2', text: t('players', { count: r.players.length, max: r.max }) }),
       h('div', { class: 'plist' }, r.players.map((p) =>
         h('div', { class: 'prow' },
           avatar(p.color),
-          h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
-          p.id === r.host ? h('span', { class: 'host-tag', text: 'Host' }) : null,
-          h('span', { class: 'st' }, h('span', { class: `dot${p.connected ? '' : ' off'}` }), p.connected ? 'ready' : 'away'),
+          h('span', { class: 'grow', text: p.id === st.you ? t('you', { name: p.name }) : p.name }),
+          p.id === r.host ? h('span', { class: 'host-tag', text: t('host') }) : null,
+          h('span', { class: 'st' }, h('span', { class: `dot${p.connected ? '' : ' off'}` }), p.connected ? t('st.ready') : t('st.away')),
           isHost && p.id !== st.you
-            ? h('button', { class: 'kick', type: 'button', 'aria-label': `Remove ${p.name}`, onClick: () => {
-              if (confirm(`Remove ${p.name} from the lobby?`)) send({ t: 'kick', target: p.id });
+            ? h('button', { class: 'kick', type: 'button', 'aria-label': t('lobby.remove', { name: p.name }), onClick: () => {
+              if (confirm(t('lobby.removeAsk', { name: p.name }))) send({ t: 'kick', target: p.id });
             } }, icon('x', 18))
             : null))),
       isHost
         ? h('label', { class: 'check' },
           h('input', { type: 'checkbox', checked: r.public, onChange: (e) => send({ t: 'setPublic', value: e.target.checked }) }),
-          'Show in the public lobby list')
+          t('create.public'))
         : null,
       imposterSetting(st, isHost),
-      h('p', { class: 'note', text: `Min. ${r.min} players · 45 sec drawing · ${imposterWord(r.imposters)}` }),
+      h('p', { class: 'note', text: t('lobby.note', { min: r.min, imposters: imposterWord(r.imposters) }) }),
       h('div', { class: 'spacer' }),
       isHost
-        ? btn(ready ? 'Start game' : `Need ${r.min - connectedCount(st)} more`, () => send({ t: 'start' }), { disabled: !ready })
-        : btn('Waiting for host…', () => {}, { disabled: true })));
+        ? btn(ready ? t('lobby.start') : t('lobby.need', { n: r.min - connectedCount(st) }), () => send({ t: 'start' }), { disabled: !ready })
+        : btn(t('waitingHost'), () => {}, { disabled: true })));
   };
 
   /** How many imposters: the host can change it, everyone else just sees it. */
@@ -822,14 +897,14 @@
     const more = 2 * (most + 1) + 1; // players needed for one more imposter
     return h('div', { class: 'col' },
       h('div', { class: 'stepper' },
-        h('span', { class: 'label grow', text: 'Imposters' }),
-        isHost ? step('Fewer imposters', -1, n <= 1) : null,
+        h('span', { class: 'label grow', text: t('imp.label') }),
+        isHost ? step(t('imp.fewer'), -1, n <= 1) : null,
         h('span', { class: 'step-n', text: String(n), 'aria-live': 'polite' }),
-        isHost ? step('More imposters', 1, n >= most) : null),
+        isHost ? step(t('imp.more'), 1, n >= most) : null),
       isHost
         ? h('p', { class: 'small', text: more <= st.room.max
-          ? `There must be more innocents than imposters. ${more} players allows ${most + 1}.`
-          : 'There must be more innocents than imposters.' })
+          ? `${t('imp.rule')} ${t('imp.next', { players: more, count: most + 1 })}`
+          : t('imp.rule') })
         : null);
   }
 
@@ -861,23 +936,22 @@
     const readyN = r.players.filter((p) => playing(p) && p.ready).length;
     root.append(screenEl('',
       h('div', { class: 'row between' },
-        h('span', { class: 'label', text: `ROUND ${r.round}` }),
+        h('span', { class: 'label', text: t('prompt.round', { round: r.round }) }),
         imp
-          ? h('span', { class: 'pill small-pill' }, icon('hat', 28), 'IMPOSTER VIEW')
-          : h('span', { class: 'row small' }, icon('eye', 26), 'Keep this secret')),
-      h('h1', { class: 'h1 xl', text: imp ? 'Your hint' : 'Your prompt' }),
+          ? h('span', { class: 'pill small-pill' }, icon('hat', 28), t('prompt.impView'))
+          : h('span', { class: 'row small' }, icon('eye', 26), t('prompt.secret'))),
+      h('h1', { class: 'h1 xl', text: imp ? t('prompt.hintTitle') : t('prompt.promptTitle') }),
       imp
-        ? h('div', { class: 'card shadow col center' }, h('div', { class: 'qmark', text: '?' }), bigText('big-word mid', sec.hint))
-        : h('div', { class: 'card shadow col center' }, h('div', { class: 'caps', text: `Category: ${sec.category}` }), bigText('big-word', sec.word)),
+        ? h('div', { class: 'card shadow col center' }, h('div', { class: 'qmark', text: '?' }), bigText('big-word mid', loc(sec.hint)))
+        : h('div', { class: 'card shadow col center' }, h('div', { class: 'caps', text: t('prompt.category', { category: loc(sec.category) }) }), bigText('big-word', loc(sec.word))),
       h('p', { class: 'sub tall', text: r.imposters > 1
-        ? (imp ? `There are ${r.imposters} imposters. You don't know the secret word, or who the others are. Draw something that fits the hint.`
-          : `There are ${r.imposters} imposters this round. Draw the word without showing anyone your screen.`)
-        : (imp ? "You don't know the secret word. Draw something that fits the hint." : 'Draw the word without showing anyone your screen.') }),
+        ? t(imp ? 'prompt.impTextMany' : 'prompt.textMany', { n: r.imposters })
+        : t(imp ? 'prompt.impText' : 'prompt.text') }),
       h('div', { class: 'spacer' }),
       waiting
-        ? [h('p', { class: 'small center' }, `${readyN} of ${connectedCount(st)} ready · drawing starts in `, timerText(r.deadline)),
-          btn('Waiting for others…', () => {}, { disabled: true })]
-        : btn("I'm ready", () => send({ t: 'ready' }))));
+        ? [h('p', { class: 'small center' }, tn('prompt.readyCount', { ready: readyN, total: connectedCount(st), time: timerText(r.deadline) })),
+          btn(t('waitingOthers'), () => {}, { disabled: true })]
+        : btn(t('prompt.ready'), () => send({ t: 'ready' }))));
   }
   screens.prompt = (root, st) => promptScreen(root, st, false);
   screens.promptWait = (root, st) => promptScreen(root, st, true);
@@ -924,8 +998,8 @@
       return b;
     };
     const actBtn = (ico, label, onClick) => h('button', { class: 'tool', type: 'button', onClick }, icon(ico, 28), label);
-    const undoBtn = actBtn('undo', 'Undo', () => pad.undo());
-    const redoBtn = actBtn('redo', 'Redo', () => pad.redo());
+    const undoBtn = actBtn('undo', t('tool.undo'), () => pad.undo());
+    const redoBtn = actBtn('redo', t('tool.redo'), () => pad.redo());
     const syncHistory = () => {
       undoBtn.disabled = !pad.strokes.length;
       redoBtn.disabled = !pad.undone.length;
@@ -937,13 +1011,13 @@
       if (!keepTool && pad.tool === 'eraser') setTool('pencil');
     };
     const swatch = (i) => {
-      const b = h('button', { class: 'swatch', type: 'button', 'aria-label': PALETTE_NAMES[i], 'aria-pressed': 'false', onClick: () => setColor(i) });
+      const b = h('button', { class: 'swatch', type: 'button', 'aria-label': t(`color.${i}`), 'aria-pressed': 'false', onClick: () => setColor(i) });
       b.style.background = PALETTE[i];
       swatches.push(b);
       return b;
     };
     const sizeBtn = (i) => {
-      const b = h('button', { class: 'size', type: 'button', 'aria-label': SIZE_NAMES[i], 'aria-pressed': String(i === S.ui.sizeIdx), onClick: () => {
+      const b = h('button', { class: 'size', type: 'button', 'aria-label': t(`size.${i}`), 'aria-pressed': String(i === S.ui.sizeIdx), onClick: () => {
         S.ui.sizeIdx = i;
         pad.size = SIZES[i];
         sizes.forEach((s, j) => s.setAttribute('aria-pressed', String(i === j)));
@@ -955,7 +1029,7 @@
     };
 
     const pill = timerPill(st.room.deadline);
-    const banner = h('div', { class: 'warn-banner', role: 'status', hidden: true }, '10 seconds left!');
+    const banner = h('div', { class: 'warn-banner', role: 'status', hidden: true }, t('draw.warn'));
     wrap.append(banner);
     const beeps = countdown(10, () => {
       pill.classList.add('warn');
@@ -965,20 +1039,20 @@
     });
     root.append(screenEl('fit draw',
       h('div', { class: 'row between' },
-        h('h1', { class: 'h1 left', text: 'Draw your answer' }),
+        h('h1', { class: 'h1 left', text: t('draw.title') }),
         pill),
-      h('div', { class: 'pill paper' }, imp ? 'Your hint: ' : 'Your word: ', h('b', { class: 'chip-word', text: imp ? sec.hint : sec.word.toUpperCase() })),
+      h('div', { class: 'pill paper' }, imp ? t('draw.yourHint') : t('draw.yourWord'), h('b', { class: 'chip-word', text: imp ? loc(sec.hint) : loc(sec.word).toUpperCase() })),
       wrap,
       h('div', { class: 'tools' },
-        toolBtn('pencil', 'pencil', 'Pencil', () => setTool('pencil')),
-        toolBtn('fill', 'bucket', 'Fill', () => setTool('fill')),
-        toolBtn('eraser', 'eraser', 'Eraser', () => setTool('eraser')),
+        toolBtn('pencil', 'pencil', t('tool.pencil'), () => setTool('pencil')),
+        toolBtn('fill', 'bucket', t('tool.fill'), () => setTool('fill')),
+        toolBtn('eraser', 'eraser', t('tool.eraser'), () => setTool('eraser')),
         undoBtn,
         redoBtn,
-        actBtn('trash', 'Clear', () => { if (!pad.strokes.length || confirm('Clear your whole drawing?')) pad.clear(); })),
-      h('div', { class: 'palette', role: 'group', 'aria-label': 'Colours' }, PALETTE.map((_, i) => swatch(i))),
-      h('div', { class: 'sizes' }, 'Brush size', sizeBtn(0), sizeBtn(1), sizeBtn(2)),
-      btn('Submit drawing', submit)));
+        actBtn('trash', t('tool.clear'), () => { if (!pad.strokes.length || confirm(t('draw.clearAsk'))) pad.clear(); })),
+      h('div', { class: 'palette', role: 'group', 'aria-label': t('draw.colours') }, PALETTE.map((_, i) => swatch(i))),
+      h('div', { class: 'sizes' }, t('draw.brush'), sizeBtn(0), sizeBtn(1), sizeBtn(2)),
+      btn(t('draw.submit'), submit)));
     setTool(S.ui.tool);
     setColor(S.ui.colorIdx, true);
     syncHistory();
@@ -1008,14 +1082,14 @@
     const total = connectedCount(st);
     const done = r.players.filter((p) => playing(p) && p.submitted).length;
     root.append(screenEl('',
-      h('h1', { class: 'h1', text: 'Drawing locked in!' }),
+      h('h1', { class: 'h1', text: t('drawWait.title') }),
       h('div', { class: 'locked' }, thumb(S.ui.myStrokes), h('span', { class: 'lockbadge' }, icon('lock', 22))),
       h('div', { class: 'center' },
-        h('div', { class: 'h2 big', text: 'Waiting for others…' }),
-        h('div', { class: 'small' }, `${done} of ${total} submitted · `, timerText(r.deadline), ' left')),
-      h('div', { class: 'progress', role: 'img', 'aria-label': `${done} of ${total} drawings submitted` },
+        h('div', { class: 'h2 big', text: t('waitingOthers') }),
+        h('div', { class: 'small' }, tn('drawWait.count', { done, total, time: timerText(r.deadline) }))),
+      h('div', { class: 'progress', role: 'img', 'aria-label': t('drawWait.progress', { done, total }) },
         r.players.filter(playing).map((p) => h('i', { class: p.submitted ? 'on' : '' }))),
-      statusList(st, 'submitted', 'done', '✎ still drawing…')));
+      statusList(st, 'submitted', t('st.done'), t('st.drawing'))));
   };
 
   // ----- reveal
@@ -1029,24 +1103,25 @@
     const cards = {}; // drawing id -> { el, buttons, counts }
     const tiles = (st.drawings || []).map((d) => {
       const mine = d.id === st.you;
-      const name = mine ? `${d.name} (You)` : d.name;
-      const card = { counts: [], buttons: REACTIONS.map(([emoji, label], i) => h('button', {
-        class: 'react', type: 'button', 'aria-label': `${label} reaction for ${name}`, 'aria-pressed': 'false',
+      const name = mine ? t('you', { name: d.name }) : d.name;
+      const card = { counts: [], buttons: REACTIONS.map((emoji, i) => h('button', {
+        class: 'react', type: 'button', 'aria-label': t('react.aria', { label: t(`react.${i}`), name }), 'aria-pressed': 'false',
         onClick: () => send({ t: 'react', target: d.id, r: i }),
       }, h('span', { text: emoji }), h('b', { class: 'n' }))) };
       card.el = h('div', { class: 'tile-wrap' },
         h('button', {
-          class: `tile${mine ? ' me' : ''}`, type: 'button', 'aria-label': `Enlarge ${mine ? 'your' : `${d.name}'s`} drawing`,
+          class: `tile${mine ? ' me' : ''}`, type: 'button', 'aria-label': mine ? t('reveal.enlargeYours') : t('reveal.enlarge', { name: d.name }),
           onClick: () => openSheet([h('div', { class: 'h2', text: name }), thumb(d.strokes)]),
         }, thumb(d.strokes), h('span', { class: 'cap', text: name })),
-        h('div', { class: 'reacts', role: 'group', 'aria-label': `Reactions for ${name}` }, card.buttons));
+        h('div', { class: 'reacts', role: 'group', 'aria-label': t('react.group', { name }) }, card.buttons));
       cards[d.id] = card;
       return card.el;
     });
     const status = h('p', { class: 'small center' });
     function paint(s) {
       const readyN = s.room.players.filter((p) => playing(p) && p.ready).length;
-      status.replaceChildren(waiting ? `${readyN} of ${connectedCount(s)} ready · ` : '', 'voting starts in ', timerText(s.room.deadline));
+      const time = timerText(s.room.deadline);
+      status.replaceChildren(...(waiting ? tn('reveal.readyCount', { ready: readyN, total: connectedCount(s), time }) : tn('reveal.starts', { time })));
       const here = new Set((s.drawings || []).map((d) => d.id));
       for (const [id, card] of Object.entries(cards)) {
         if (!here.has(id)) { card.el.remove(); continue; } // they left the game
@@ -1063,13 +1138,13 @@
     paint(st);
     root.append(screenEl('',
       h('div', { class: 'center' },
-        h('h1', { class: 'h1', text: 'Who looks suspicious?' }),
-        h('p', { class: 'sub', text: 'Discuss the drawings before voting.' })),
+        h('h1', { class: 'h1', text: t('reveal.title') }),
+        h('p', { class: 'sub', text: t('reveal.sub') })),
       h('div', { class: 'grid2' }, tiles),
-      h('p', { class: 'small center row' }, icon('zoom', 22, '#3B3560'), 'Tap a drawing to enlarge it'),
+      h('p', { class: 'small center row' }, icon('zoom', 22, '#3B3560'), t('reveal.tap')),
       h('div', { class: 'spacer' }),
       status,
-      waiting ? btn('Waiting for others…', () => {}, { disabled: true }) : btn('Vote now', () => send({ t: 'ready' }))));
+      waiting ? btn(t('waitingOthers'), () => {}, { disabled: true }) : btn(t('reveal.vote'), () => send({ t: 'ready' }))));
     return { update: paint };
   }
   screens.reveal = (root, st) => revealScreen(root, st, false);
@@ -1085,12 +1160,12 @@
       if (picks.length === need) send({ t: 'vote', targets: picks });
     });
     const sync = () => {
-      submit.textContent = need > 1 ? `Submit votes (${picks.length}/${need})` : 'Submit vote';
+      submit.textContent = need > 1 ? t('vote.submitMany', { picked: picks.length, need }) : t('vote.submit');
       submit.disabled = picks.length !== need;
       root.querySelectorAll('.choice').forEach((c) => c.classList.toggle('on', picks.includes(c.dataset.id)));
     };
     const choices = others.map((d) => {
-      const input = h('input', { type: need > 1 ? 'checkbox' : 'radio', name: 'vote', 'aria-label': `Vote for ${d.name}`, checked: picks.includes(d.id) });
+      const input = h('input', { type: need > 1 ? 'checkbox' : 'radio', name: 'vote', 'aria-label': t('vote.for', { name: d.name }), checked: picks.includes(d.id) });
       const label = h('label', { class: 'choice', 'data-id': d.id },
         h('div', { class: 'thumb-sm' }, thumb(d.strokes)),
         h('span', { class: 'nm', text: d.name }),
@@ -1098,7 +1173,7 @@
       input.addEventListener('change', () => {
         if (need === 1) picks.splice(0, picks.length, d.id);
         else if (!input.checked) picks.splice(picks.indexOf(d.id), 1);
-        else if (picks.length >= need) { input.checked = false; toast(`You can pick ${need}. Untick one first.`); }
+        else if (picks.length >= need) { input.checked = false; toast(t('vote.pickLimit', { n: need })); }
         else picks.push(d.id);
         sync();
       });
@@ -1107,10 +1182,10 @@
     root.append(screenEl('',
       h('div', { class: 'row between' }, h('span'), timerPill(st.room.deadline)),
       h('div', { class: 'center' },
-        h('h1', { class: 'h1', text: need > 1 ? `Find the ${need} imposters` : 'Find the imposter' }),
-        h('p', { class: 'sub', text: need > 1 ? `Pick ${need} players. You need to catch them all. Your votes are private.` : 'Choose one player. Your vote is private.' })),
+        h('h1', { class: 'h1', text: need > 1 ? t('vote.titleMany', { n: need }) : t('vote.title') }),
+        h('p', { class: 'sub', text: need > 1 ? t('vote.subMany', { n: need }) : t('vote.sub') })),
       h('div', { class: 'col choices' }, choices),
-      h('p', { class: 'small center row' }, icon('lock', 20, '#33405A'), 'Votes stay hidden until everyone has voted.'),
+      h('p', { class: 'small center row' }, icon('lock', 20, '#33405A'), t('vote.hidden')),
       h('div', { class: 'spacer' }),
       submit));
     sync();
@@ -1123,40 +1198,36 @@
     const total = connectedCount(st);
     const done = st.room.players.filter((p) => playing(p) && p.voted).length;
     root.append(screenEl('',
-      h('h1', { class: 'h1 xl', text: 'Vote locked in!' }),
+      h('h1', { class: 'h1 xl', text: t('voteWait.title') }),
       h('div', { class: 'center' },
-        h('div', { class: 'h2 big', text: 'Waiting for others…' }),
-        h('div', { class: 'small' }, `${done} of ${total} voted · `, timerText(st.room.deadline), ' left')),
-      h('div', { class: 'progress', role: 'img', 'aria-label': `${done} of ${total} votes in` },
+        h('div', { class: 'h2 big', text: t('waitingOthers') }),
+        h('div', { class: 'small' }, tn('voteWait.count', { done, total, time: timerText(st.room.deadline) }))),
+      h('div', { class: 'progress', role: 'img', 'aria-label': t('voteWait.progress', { done, total }) },
         st.room.players.filter(playing).map((p) => h('i', { class: p.voted ? 'on' : '' }))),
-      statusList(st, 'voted', 'voted', 'thinking…')));
+      statusList(st, 'voted', t('st.voted'), t('st.thinking'))));
   };
 
   // ----- imposter's last-chance guess
   screens.guess = (root, st) => {
     setBg('#FFE0C7');
-    const input = h('input', { class: 'input big', id: 'gs', type: 'text', maxlength: 40, value: S.ui.guessText, autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: 'Type your guess' });
+    const input = h('input', { class: 'input big', id: 'gs', type: 'text', maxlength: 40, value: S.ui.guessText, autocomplete: 'off', autocapitalize: 'none', spellcheck: 'false', placeholder: t('guess.placeholder') });
     input.addEventListener('input', () => { S.ui.guessText = input.value; });
     const go = () => {
       const w = input.value.trim();
-      if (!w) { toast('Type a guess first'); input.focus(); return; }
+      if (!w) { toast(t('guess.empty')); input.focus(); return; }
       send({ t: 'guess', word: w });
     };
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
     root.append(screenEl('',
       h('div', { class: 'row' }, h('span', { class: 'spacer' }), timerPill(st.room.deadline)),
       h('div', { class: 'center' },
-        h('h1', { class: 'h1 huge', text: 'Caught!' }),
-        h('p', { class: 'sub tall', text: st.room.imposters > 1
-          ? 'The group caught every imposter, you included. You still have one shot to steal the win.'
-          : 'The group voted for you. You still have one shot to steal the win.' })),
-      h('div', { class: 'card shadow col center' }, h('div', { class: 'caps small', text: 'Your hint was' }), bigText('big-word mid', st.guess.hint || '')),
-      h('div', { class: 'col' }, h('label', { class: 'label', for: 'gs', text: 'What was the secret word?' }), input,
-        h('p', { class: 'small center', text: st.room.imposters > 1
-          ? 'One guess each. If any imposter gets it right, the imposters win.'
-          : 'One guess only. Get it right and the imposter wins.' })),
+        h('h1', { class: 'h1 huge', text: t('guess.title') }),
+        h('p', { class: 'sub tall', text: t(st.room.imposters > 1 ? 'guess.subMany' : 'guess.sub') })),
+      h('div', { class: 'card shadow col center' }, h('div', { class: 'caps small', text: t('guess.hintWas') }), bigText('big-word mid', loc(st.guess.hint))),
+      h('div', { class: 'col' }, h('label', { class: 'label', for: 'gs', text: t('guess.label') }), input,
+        h('p', { class: 'small center', text: t(st.room.imposters > 1 ? 'guess.ruleMany' : 'guess.rule') })),
       h('div', { class: 'spacer' }),
-      btn('Lock in guess', go)));
+      btn(t('guess.lock'), go)));
     return { update() {} };
   };
 
@@ -1168,10 +1239,10 @@
       h('div', { class: 'card shadow col center' },
         h('div', { class: 'qmark', text: '?' }),
         st.guess.imposter
-          ? [h('h1', { class: 'h1', text: 'Guess locked in!' }), h('p', { class: 'sub', text: 'Waiting for the other imposters to guess…' })]
+          ? [h('h1', { class: 'h1', text: t('gw.lockedTitle') }), h('p', { class: 'sub', text: t('gw.lockedSub') })]
           : st.room.imposters > 1
-            ? [h('h1', { class: 'h1', text: 'Imposters caught!' }), h('p', { class: 'sub', text: 'They each get one chance to guess the secret word. Fingers crossed…' })]
-            : [h('h1', { class: 'h1', text: 'Imposter caught!' }), h('p', { class: 'sub', text: 'They get one chance to guess the secret word. Fingers crossed…' })]),
+            ? [h('h1', { class: 'h1', text: t('gw.manyTitle') }), h('p', { class: 'sub', text: t('gw.manySub') })]
+            : [h('h1', { class: 'h1', text: t('gw.title') }), h('p', { class: 'sub', text: t('gw.sub') })]),
       h('div', { class: 'spacer' })));
   };
 
@@ -1179,24 +1250,21 @@
   screens.waitNext = (root, st) => {
     setBg('#FFF6E5');
     const r = st.room;
-    const doing = {
-      prompt: 'reading their prompts', draw: 'drawing', reveal: 'looking at the drawings',
-      vote: 'voting', guess: 'waiting on the last guess', results: 'looking at the results',
-    }[r.phase] || 'playing';
+    const doing = ['prompt', 'draw', 'reveal', 'vote', 'guess', 'results'].includes(r.phase) ? r.phase : 'draw';
     root.append(screenEl('',
-      header("You're in!", leaveGame, soundBtn()),
+      header(t('wn.title'), leaveGame, soundBtn()),
       h('div', { class: 'card shadow col center' },
-        h('div', { class: 'h2 big center', text: 'A round is already going' }),
-        h('p', { class: 'sub', text: `The others are ${doing}. You’ll join in from the next round.` })),
-      h('h2', { class: 'h2', text: `Players (${r.players.length}/${r.max})` }),
+        h('div', { class: 'h2 big center', text: t('wn.card') }),
+        h('p', { class: 'sub', text: t(`wn.${doing}`) })),
+      h('h2', { class: 'h2', text: t('players', { count: r.players.length, max: r.max }) }),
       h('div', { class: 'plist' }, r.players.map((p) =>
         h('div', { class: 'prow' },
           avatar(p.color),
-          h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
-          p.id === r.host ? h('span', { class: 'host-tag', text: 'Host' }) : null,
-          h('span', { class: 'st', text: p.waiting ? 'next round' : p.connected ? 'playing' : 'away' })))),
+          h('span', { class: 'grow', text: p.id === st.you ? t('you', { name: p.name }) : p.name }),
+          p.id === r.host ? h('span', { class: 'host-tag', text: t('host') }) : null,
+          h('span', { class: 'st', text: p.waiting ? t('st.nextRound') : p.connected ? t('st.playing') : t('st.away') })))),
       h('div', { class: 'spacer' }),
-      btn('Next round soon…', () => {}, { disabled: true })));
+      btn(t('wn.btn'), () => {}, { disabled: true })));
   };
 
   // ----- results
@@ -1208,44 +1276,43 @@
     const imps = r.imposters;
     const many = imps.length > 1;
     const one = imps[0];
-    const lines = [h('p', { class: 'res-line' }, 'The secret word was ', h('b', { class: 'chip-word', text: r.word.toUpperCase() }), '.'),
-      h('p', { class: 'res-line', text: many ? `The imposters’ hint was “${r.hint}”.` : `${one.name}’s hint was “${r.hint}”.` })];
+    const lines = [h('p', { class: 'res-line' }, tn('res.word', { word: h('b', { class: 'chip-word', text: loc(r.word).toUpperCase() }) })),
+      h('p', { class: 'res-line', text: many ? t('res.hintMany', { hint: loc(r.hint) }) : t('res.hint', { name: one.name, hint: loc(r.hint) }) })];
     const right = imps.find((i) => i.guessCorrect);
+    const guessed = imps.filter((i) => i.guess).map((i) => t('res.guessed', { name: i.name, guess: i.guess }));
     const why = {
-      guessright: right && `${right.name} guessed “${right.guess}” and stole the win!`,
-      guesswrong: many
-        ? `${imps.filter((i) => i.guess).map((i) => `${i.name} guessed “${i.guess}”`).join(', ')}. Not quite.`
-        : `${one.name} guessed “${one.guess}”. Not quite.`,
-      noguess: many ? 'The imposters ran out of time to guess.' : `${one.name} ran out of time to guess.`,
-      tie: many ? 'The vote was tied, so the imposters slipped away.' : 'The vote was tied, so the imposter slipped away.',
-      wrongsuspect: many ? `The group only caught ${imps.filter((i) => i.caught).length} of ${imps.length} imposters.` : 'The group voted for the wrong person.',
-      novotes: many ? 'Nobody voted, so the imposters got away.' : 'Nobody voted, so the imposter got away.',
+      guessright: right && t('res.guessright', { name: right.name, guess: right.guess }),
+      guesswrong: t('res.notQuite', { text: guessed.join(lang === 'zh' || lang === 'ja' ? '、' : lang === 'ar' ? '، ' : ', ') }),
+      noguess: many ? t('res.noguessMany') : t('res.noguess', { name: one.name }),
+      tie: t(many ? 'res.tieMany' : 'res.tie'),
+      wrongsuspect: many ? t('res.wrongMany', { caught: imps.filter((i) => i.caught).length, total: imps.length }) : t('res.wrong'),
+      novotes: t(many ? 'res.novotesMany' : 'res.novotes'),
     }[r.reason];
     if (why) lines.push(h('p', { class: 'res-line', text: why }));
-    const maxVotes = Math.max(1, ...r.tally.map((t) => t.count));
+    const maxVotes = Math.max(1, ...r.tally.map((v) => v.count));
 
     root.append(screenEl('',
-      h('h1', { class: 'h1', text: many ? 'The imposters were…' : 'The imposter was…' }),
+      h('h1', { class: 'h1', text: t(many ? 'res.titleMany' : 'res.title') }),
       h('div', { class: 'card shadow col center' },
         many
           ? h('div', { class: 'col imps' }, imps.map((i) => h('div', { class: 'row' },
             avatar(i.color), h('span', { class: 'h2 grow', text: i.name }),
-            h('span', { class: `badge mini ${i.caught ? 'good' : 'bad'}`, text: i.caught ? 'CAUGHT' : 'ESCAPED' }))))
+            h('span', { class: `badge mini ${i.caught ? 'good' : 'bad'}`, text: t(i.caught ? 'res.caughtTag' : 'res.escapedTag') }))))
           : h('div', { class: 'row' }, avatar(one.color, 'av lg'), h('span', { class: 'h1 name', text: one.name })),
-        h('span', { class: `badge ${r.caught ? 'good' : 'bad'}`, text: r.caught ? (many ? 'ALL CAUGHT!' : 'CAUGHT!') : 'ESCAPED!' }),
+        h('span', { class: `badge ${r.caught ? 'good' : 'bad'}`, text: t(r.caught ? (many ? 'res.allCaught' : 'res.caught') : 'res.escaped') }),
         lines),
-      h('div', { class: 'center' }, h('span', { class: 'pill' }, win ? 'Players win!' : many ? 'Imposters win!' : 'Imposter wins!')),
+      h('div', { class: 'center' }, h('span', { class: 'pill' }, t(win ? 'res.playersWin' : many ? 'res.impsWin' : 'res.impWin'))),
       h('div', { class: 'card col' },
-        h('div', { class: 'h2', text: 'Votes' }),
-        r.tally.map((t) => h('div', { class: 'row' },
-          h('span', { class: 'vname', text: t.name }),
-          h('span', { class: 'bar' }, h('i', { 'data-w': t.count / maxVotes })),
-          h('span', { class: 'vcount', text: t.count })))),
+        h('div', { class: 'h2', text: t('res.votes') }),
+        r.tally.map((v) => h('div', { class: 'row' },
+          h('span', { class: 'vname', text: v.name }),
+          h('span', { class: 'bar' }, h('i', { 'data-w': v.count / maxVotes })),
+          h('span', { class: 'vcount', text: v.count })))),
       h('div', { class: 'spacer' }),
-      isHost ? btn('Play again', () => send({ t: 'again' })) : btn('Waiting for host…', () => {}, { disabled: true }),
+      isHost ? btn(t('res.again'), () => send({ t: 'again' })) : btn(t('waitingHost'), () => {}, { disabled: true }),
       h('div', { class: 'row' },
-        isHost ? h('button', { class: 'link grow', type: 'button', onClick: () => send({ t: 'lobby' }) }, 'Return to lobby') : null,
-        h('button', { class: 'link grow', type: 'button', onClick: leaveGame }, 'Leave game'))));
+        isHost ? h('button', { class: 'link grow', type: 'button', onClick: () => send({ t: 'lobby' }) }, t('res.lobby')) : null,
+        h('button', { class: 'link grow', type: 'button', onClick: leaveGame }, t('res.leave')))));
     root.querySelectorAll('.bar i').forEach((i) => { i.style.width = `${Math.round(Number(i.dataset.w) * 100)}%`; });
   };
 
@@ -1292,7 +1359,7 @@
     if (S.handle && S.handle.tick) S.handle.tick();
   }, 250);
 
-  if (new URLSearchParams(location.search).has('uitest')) window.diTest = { bigText }; // hook for test/ui.js
+  if (new URLSearchParams(location.search).has('uitest')) window.diTest = { bigText, setLang }; // hook for test/ui.js
 
   route();
   connect();

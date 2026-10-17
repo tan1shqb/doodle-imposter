@@ -11,6 +11,13 @@ const path = require('path');
 const WebSocket = require('ws');
 const { chromium } = require('playwright');
 const PROMPTS = require('../prompts');
+const vm = require('vm');
+const I18N = (() => {
+  const ctx = { window: {} };
+  vm.runInNewContext(require('fs').readFileSync(path.join(__dirname, '..', 'public', 'i18n.js'), 'utf8'), ctx);
+  return ctx.window.DI_I18N;
+})();
+const LANGS = I18N.langs.map(([code]) => code);
 
 let failures = 0;
 const ok = (cond, msg) => {
@@ -94,7 +101,7 @@ async function takeSeat(page, p) {
 /** From the lobby to the draw screen, with the page holding seat `pageSeat`. */
 async function toDraw(page, ps) {
   ps[0].send({ t: 'start' });
-  await page.getByRole('button', { name: "I'm ready" }).click();
+  await page.getByRole('button', { name: /^I.m ready$/ }).click();
   ps.forEach((p) => p.send({ t: 'ready' }));
   await page.waitForSelector('canvas.pad');
   await sleep(300);
@@ -218,7 +225,8 @@ async function main() {
         const card = document.getElementById('card');
         const bad = [];
         let smallest = Infinity;
-        const texts = [...new Set(prompts.flatMap((p) => [`w${p.word}`, `h${p.hint}`]))];
+        // English only here: the other languages get their own fonts, checked below
+        const texts = [...new Set(prompts.flatMap((p) => [`w${p.word.en}`, `h${p.hint.en}`]))];
         for (const t of texts) {
           const el = window.diTest.bigText(t[0] === 'w' ? 'big-word' : 'big-word mid', t.slice(1));
           card.replaceChildren(el);
@@ -232,6 +240,104 @@ async function main() {
       ok(!res.bad.length, `${width}px: all ${res.n} words and hints fit without breaking a word${res.bad.length ? ` (not: ${res.bad.join(', ')})` : ''}`);
       ok(res.smallest >= 24, `${width}px: smallest text is still readable (${res.smallest}px)`);
       await page.close();
+    }
+
+    {
+      const page = await newPage(browser, PORT, errors, '?uitest');
+      await page.setViewportSize({ width: 320, height: 700 });
+      const bad = [];
+      let smallest = Infinity;
+      for (const code of LANGS.filter((l) => l !== 'en')) {
+        await page.evaluate((l) => window.diTest.setLang(l), code);
+        const res = await page.evaluate(async ([prompts, l]) => {
+          const app = document.getElementById('app');
+          app.innerHTML = '<div class="screen"><div class="card shadow col center" id="card"></div></div>';
+          const card = document.getElementById('card');
+          const texts = [...new Set(prompts.flatMap((p) => [`w${p.word[l]}`, `h${p.hint[l]}`]))];
+          // render each once first so the language's font gets requested, then measure for real
+          for (const tx of texts) card.append(window.diTest.bigText('big-word', tx.slice(1)));
+          await document.fonts.ready;
+          const out = { bad: [], smallest: Infinity, tiny: [] };
+          for (const tx of texts) {
+            const el = window.diTest.bigText(tx[0] === 'w' ? 'big-word' : 'big-word mid', tx.slice(1));
+            card.replaceChildren(el);
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            const widest = Math.max(...[...el.children].map((x) => x.getBoundingClientRect().width));
+            if (widest > el.clientWidth) out.bad.push(tx.slice(1));
+            const px = parseFloat(getComputedStyle(el).fontSize);
+            out.smallest = Math.min(out.smallest, px);
+            if (px < 24) out.tiny.push(`${tx.slice(1)} ${px}px`);
+          }
+          return out;
+        }, [PROMPTS, code]);
+        if (res.tiny.length) console.log(`    smallest in ${code}: ${res.tiny.join(', ')}`);
+        bad.push(...res.bad.map((x) => `${code}: ${x}`));
+        smallest = Math.min(smallest, res.smallest);
+      }
+      ok(!bad.length, `320px: every word and hint fits in the other ${LANGS.length - 1} languages too${bad.length ? ` (not: ${bad.slice(0, 6).join(', ')})` : ''}`);
+      ok(smallest >= 20, `320px: the smallest text in any language is still readable (${smallest}px)`);
+      await page.close();
+    }
+
+    // ------------------------------------------------------------ languages
+    console.log('Languages');
+    {
+      const page = await newPage(browser, PORT, errors);
+      await page.getByRole('button', { name: 'Language: English' }).click();
+      await page.getByRole('button', { name: 'Español' }).click();
+      await page.getByRole('button', { name: 'Crear partida' }).waitFor();
+      ok(await page.evaluate(() => document.documentElement.lang) === 'es', 'picking Español on the home screen switches the page to Spanish');
+      await page.reload();
+      ok(await page.getByRole('button', { name: 'Crear partida' }).count() === 1, 'the choice is remembered on this phone');
+      await page.getByRole('button', { name: /^Idioma/ }).click();
+      await page.getByRole('button', { name: 'العربية' }).click();
+      await page.getByRole('button', { name: 'إنشاء لعبة' }).waitFor();
+      ok(await page.evaluate(() => document.documentElement.dir) === 'rtl', 'Arabic lays the page out right to left');
+      ok(await page.locator('link#font-ar').count() === 1, 'and loads a font with Arabic letters');
+      await shot(page, 'home-ar');
+      await page.close();
+    }
+    {
+      // the tightest screens, in every language: no text may spill out of its box
+      const spills = [];
+      const check = async (page, where) => {
+        await page.evaluate(() => document.fonts.ready);
+        await sleep(250);
+        const bad = await page.evaluate(() => [...document.querySelectorAll('.tool, .btn, .pill, .sizes, .lang-btn, .stepper, h1:not(.logo)')]
+          .filter((el) => el.offsetParent && el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent.trim()));
+        if (bad.length) spills.push(`${where}: ${bad.join(' | ')}`);
+      };
+      // switch language in place (a reload would briefly drop the host, and hand host to someone else)
+      const setLang = (page, code) => page.evaluate((l) => window.diTest.setLang(l), code);
+      const home = await newPage(browser, PORT, errors, '?uitest');
+      const { ps } = await makeRoom(PORT, ['Ava', 'Ben', 'Cleo', 'Dev', 'Eve']);
+      const lobby = await newPage(browser, PORT, errors, '?uitest');
+      await takeSeat(lobby, ps[0]);
+      await lobby.locator('.stepper .step').first().waitFor();
+      for (const code of LANGS) {
+        await setLang(home, code);
+        await check(home, `home ${code}`);
+        await setLang(lobby, code);
+        await check(lobby, `lobby ${code}`);
+        await shot(lobby, `lobby-${code}`);
+      }
+      // then into a round, to see the drawing tools in every language
+      await setLang(lobby, 'en');
+      await lobby.getByRole('button', { name: 'Start game' }).click();
+      await lobby.getByRole('button', { name: /^I.m ready$/ }).click();
+      ps.slice(2).forEach((p) => p.send({ t: 'ready' }));
+      const draw = await newPage(browser, PORT, errors, '?uitest');
+      await takeSeat(draw, ps[1]);
+      await draw.getByRole('button', { name: /^I.m ready$/ }).click();
+      await draw.waitForSelector('canvas.pad');
+      for (const code of LANGS) {
+        await setLang(draw, code);
+        await draw.waitForSelector('canvas.pad');
+        await check(draw, `draw ${code}`);
+        await shot(draw, `draw-${code}`);
+      }
+      ok(!spills.length, `home, lobby and drawing screens fit in all ${LANGS.length} languages${spills.length ? ` (spills: ${spills.join('; ')})` : ''}`);
+      for (const page of [home, lobby, draw]) await page.close();
     }
 
     // ------------------------------------------------------------- lobby kick
@@ -308,7 +414,7 @@ async function main() {
       await shot(host, 'lobby-imposters');
       const others = ps.slice(1); // ps[0]'s seat now belongs to the page
       await host.getByRole('button', { name: 'Start game' }).click();
-      await host.getByRole('button', { name: "I'm ready" }).click();
+      await host.getByRole('button', { name: /^I.m ready$/ }).click();
       others.forEach((p) => p.send({ t: 'ready' }));
       await host.waitForSelector('canvas.pad');
       await host.getByRole('button', { name: 'Submit drawing' }).click();

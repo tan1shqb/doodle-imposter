@@ -333,7 +333,7 @@ h1, h2, h3, p { margin: 0; }
 .badge.bad { background: #b3361f; }
 .badge.mini { font-size: 16px; padding: 0 10px; letter-spacing: 1px; }
 .imps { width: 100%; gap: 8px; }
-.imps .h2 { text-align: left; }
+.imps .h2 { text-align: start; }
 .stepper { display: flex; align-items: center; gap: 12px; }
 .step {
   width: 48px; height: 48px; padding: 0; background: var(--paper); color: var(--ink); cursor: pointer;
@@ -388,7 +388,7 @@ h1, h2, h3, p { margin: 0; }
 .art { display: flex; justify-content: center; }
 .h1.xl { font-size: 56px; margin-top: 10px; }
 .h1.huge { font-size: 72px; transform: rotate(-2deg); }
-.h1.left { text-align: left; font-size: 36px; }
+.h1.left { text-align: start; font-size: 36px; }
 .h1.name { font-size: 48px; }
 .h2.big { font-size: 34px; line-height: 1.1; }
 .sub.tall { font-size: 22px; padding: 0 12px; }
@@ -398,8 +398,29 @@ h1, h2, h3, p { margin: 0; }
 .chip-word { font-family: var(--display); font-size: 24px; letter-spacing: 1px; }
 .res-line { font-size: 21px; line-height: 1.3; text-align: center; }
 .vname { width: 70px; font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vcount { width: 22px; text-align: right; font-size: 19px; }
+.vcount { width: 22px; text-align: end; font-size: 19px; }
 .choices { margin-top: 6px; }
 .locked { position: relative; align-self: center; width: 150px; background: #fff; border: 3px solid var(--ink); border-radius: var(--r1); box-shadow: 3px 4px 0 var(--ink); transform: rotate(-3deg); }
 .lockbadge { position: absolute; right: -14px; bottom: -14px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; background: var(--yellow); border: 3px solid var(--ink); border-radius: 50%; }
 .st.small { display: flex; align-items: center; gap: 6px; }
+
+/* ------------------------------------------------------------- languages */
+/* The doodle fonts only cover Latin, so other scripts get a matching playful font (loaded on demand). */
+html[lang='ar'] { --display: 'Gaegu', 'Baloo Bhaijaan 2', 'Comic Sans MS', cursive; --body: 'Patrick Hand', 'Baloo Bhaijaan 2', sans-serif; }
+html[lang='zh'] { --display: 'ZCOOL KuaiLe', 'Gaegu', sans-serif; --body: 'ZCOOL KuaiLe', 'Patrick Hand', sans-serif; }
+html[lang='ja'] { --display: 'Yusei Magic', 'Gaegu', sans-serif; --body: 'Yusei Magic', 'Patrick Hand', sans-serif; }
+html[lang='ar'] body * { letter-spacing: 0 !important; } /* spacing breaks joined Arabic letters */
+[dir='rtl'] .i-back, [dir='rtl'] .i-undo, [dir='rtl'] .i-redo { transform: scaleX(-1); } /* arrows point the reading way */
+.row.end { justify-content: flex-end; }
+.lang-btn {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 14px; cursor: pointer;
+  background: var(--paper); color: var(--ink); border: 3px solid var(--ink); border-radius: 22px;
+  font-family: var(--body); font-size: 20px;
+}
+.lang-btn:focus-visible, .lang-opt:focus-visible { outline: 3px solid var(--purple); outline-offset: 2px; }
+.lang-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; width: 100%; }
+.lang-opt {
+  min-height: 52px; padding: 4px 8px; cursor: pointer; background: var(--paper); color: var(--ink);
+  border: 3px solid var(--ink); border-radius: 14px 18px 12px 20px; font-size: 22px; font-family: 'Patrick Hand', 'Baloo Bhaijaan 2', 'ZCOOL KuaiLe', 'Yusei Magic', sans-serif;
+}
+.lang-opt[aria-pressed='true'] { background: #d9ccff; border-width: 4px; }

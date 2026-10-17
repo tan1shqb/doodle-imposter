@@ -122,14 +122,27 @@ function uniqueName(room, name) {
   }
   return name;
 }
-const normWord = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+/** Letters and digits only, in any alphabet, so a guess is forgiving about case, accents and spacing. */
+function normWord(s) {
+  return String(s ?? '')
+    .normalize('NFKD') // full-width forms and half-width katakana fold too
+    .replace(/\p{M}/gu, '') // accents, Arabic vowel marks and hamza
+    .toLowerCase()
+    .replace(/ß/g, 'ss')
+    .replace(/[ة]/g, 'ه').replace(/[ى]/g, 'ي')
+    .replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60)) // katakana -> hiragana
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
 function sameWord(a, b) {
   const x = normWord(a);
   const y = normWord(b);
   if (!x || !y) return false;
-  const strip = (s) => (s.length > 3 && s.endsWith('s') ? s.slice(0, -1) : s);
+  // a trailing plural s, or the Arabic article ال, is not worth losing over
+  const strip = (s) => (s.length > 3 && s.endsWith('s') ? s.slice(0, -1) : s).replace(/^ال(?=..)/, '');
   return x === y || strip(x) === strip(y);
 }
+/** A guess counts in any of the game's languages. */
+const guessMatches = (guess, word) => Object.values(word).some((w) => sameWord(guess, w));
 
 const PALETTE_SIZE = 10; // colours in public/app.js PALETTE
 const REACTIONS = 4; // reaction buttons in public/app.js REACTIONS
@@ -370,7 +383,7 @@ function finish(room) {
     winner = 'imposter';
     reason = !Object.keys(r.counts).length ? 'novotes' : r.tie ? 'tie' : 'wrongsuspect';
   } else {
-    guessCorrect = guessed.some((g) => sameWord(g, r.prompt.word)); // any imposter can steal it
+    guessCorrect = guessed.some((g) => guessMatches(g, r.prompt.word)); // any imposter can steal it
     winner = guessCorrect ? 'imposter' : 'players';
     reason = guessCorrect ? 'guessright' : guessed.length ? 'guesswrong' : 'noguess';
   }
@@ -384,7 +397,7 @@ function finish(room) {
         color: p ? p.color : 0,
         caught: r.accused.includes(id),
         guess,
-        guessCorrect: guess != null && sameWord(guess, r.prompt.word),
+        guessCorrect: guess != null && guessMatches(guess, r.prompt.word),
       };
     }),
     word: r.prompt.word,
@@ -426,14 +439,20 @@ function checkProgress(room) {
   }
 }
 
-function abortToLobby(room, message) {
+/**
+ * Something to tell players. Phones show `code` in their own language (srv.* in public/i18n.js),
+ * filling it in from `params`; `message` is the English fallback.
+ */
+const note = (code, message, params) => ({ code, params, message });
+
+function abortToLobby(room, notice) {
   setPhase(room, 'lobby', 0, null);
   room.round = null;
   for (const p of room.players) {
     p.ready = p.submitted = p.hasVoted = p.waiting = false;
     p.strokes = [];
   }
-  for (const p of room.players) if (p.connected) send(p.ws, { t: 'notice', message });
+  for (const p of room.players) if (p.connected) send(p.ws, { t: 'notice', ...notice });
   broadcast(room);
 }
 
@@ -447,13 +466,13 @@ function dropPlayer(room, p) {
 }
 
 /** Close the room and send everyone still connected back to the home screen. */
-function endGame(room, message) {
+function endGame(room, notice) {
   clearTimeout(room.timer);
   for (const q of room.players) {
     clearTimeout(q.graceTimer);
     if (q.ws) {
       q.ws.ctx = null;
-      send(q.ws, { t: 'ended', message });
+      send(q.ws, { t: 'ended', ...notice });
     }
   }
   room.players = [];
@@ -466,27 +485,30 @@ function leaveMidRound(room, p) {
   dropPlayer(room, p);
   if (inRound(room).length < CFG.MIN_PLAYERS) {
     // players waiting for the next round can still make a game
-    if (room.players.length >= CFG.MIN_PLAYERS) return abortToLobby(room, 'Not enough players left in the round, so it was cancelled.');
-    return endGame(room, 'Not enough players left, so the game ended.');
+    if (room.players.length >= CFG.MIN_PLAYERS) return abortToLobby(room, note('cancel_short', 'Not enough players left in the round, so it was cancelled.'));
+    return endGame(room, note('ended_short', 'Not enough players left, so the game ended.'));
   }
   const r = room.round;
-  let message = `${p.name} left the game.`;
+  let notice = note('left', `${p.name} left the game.`, { name: p.name });
   if (r.imposterIds.includes(p.id)) {
     r.imposterIds = r.imposterIds.filter((id) => id !== p.id);
     if (!r.imposterIds.length) {
-      return abortToLobby(room, r.startImposters > 1 ? 'The imposters left, so the round was cancelled.' : 'The imposter left, so the round was cancelled.');
+      return abortToLobby(room, r.startImposters > 1
+        ? note('cancel_imps', 'The imposters left, so the round was cancelled.')
+        : note('cancel_imp', 'The imposter left, so the round was cancelled.'));
     }
     // The count is public (everyone needs it to vote), so it gives the leaver away anyway: say it plainly.
     const n = r.imposterIds.length;
-    message = `${p.name} left. They were an imposter, so now there ${n > 1 ? `are ${n} imposters` : 'is 1 imposter'}.`;
+    notice = note('imp_left', `${p.name} left. They were an imposter, so now there ${n > 1 ? `are ${n} imposters` : 'is 1 imposter'}.`, { name: p.name, n });
     delete r.guesses[p.id];
     if (room.phase === 'vote') {
       for (const q of room.players) q.hasVoted = false; // everyone votes again, one pick per imposter left
       r.votes = {};
-      message += ' Vote again.';
+      notice.message += ' Vote again.';
+      notice.params.vote = true;
     }
   } else if (inRound(room).length - r.imposterIds.length <= r.imposterIds.length) {
-    return abortToLobby(room, 'Too few players left for this many imposters, so the round was cancelled.');
+    return abortToLobby(room, note('cancel_ratio', 'Too few players left for this many imposters, so the round was cancelled.'));
   }
   delete r.votes[p.id];
   for (const [voter, picks] of Object.entries(r.votes)) {
@@ -498,7 +520,7 @@ function leaveMidRound(room, p) {
   if (r.drawings) r.drawings = r.drawings.filter((d) => d.id !== p.id);
   delete r.reactions[p.id];
   for (const lists of Object.values(r.reactions)) lists.forEach((ids, i) => { lists[i] = ids.filter((id) => id !== p.id); });
-  for (const q of activeOf(room)) send(q.ws, { t: 'notice', message });
+  for (const q of activeOf(room)) send(q.ws, { t: 'notice', ...notice });
   checkProgress(room);
   if (room.phase !== 'results') broadcast(room);
 }
@@ -602,7 +624,7 @@ function detach(ws, left) {
   if (player.ws === ws) onDisconnect(room, player, left);
 }
 
-const err = (ws, code, message) => send(ws, { t: 'error', code, message });
+const err = (ws, code, message, params) => send(ws, { t: 'error', code, message, params }); // code doubles as the srv.* text key
 
 function handle(ws, msg) {
   const ctx = ws.ctx;
@@ -697,14 +719,14 @@ function handle(ws, msg) {
       if (p.id !== room.hostId || room.phase !== 'lobby') return;
       const n = Number(msg.value);
       const most = maxImposters(room.players.filter((q) => q.connected).length);
-      if (!Number.isInteger(n) || n < 1 || n > most) return err(ws, 'imposters', `With this many players you can have up to ${most} imposter${most > 1 ? 's' : ''}.`);
+      if (!Number.isInteger(n) || n < 1 || n > most) return err(ws, 'imposters', `With this many players you can have up to ${most} imposter${most > 1 ? 's' : ''}.`, { n: most });
       room.imposters = n;
       return broadcast(room);
     }
 
     case 'start':
       if (p.id !== room.hostId || room.phase !== 'lobby') return;
-      if (activeOf(room).length < CFG.MIN_PLAYERS) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`);
+      if (activeOf(room).length < CFG.MIN_PLAYERS) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`, { min: CFG.MIN_PLAYERS });
       return void startRound(room);
 
     case 'react': {
@@ -755,14 +777,14 @@ function handle(ws, msg) {
       if (room.phase !== 'guess' || !r.imposterIds.includes(p.id) || p.id in r.guesses) return;
       r.guesses[p.id] = String(msg.word ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 40) || null;
       // a right guess wins it straight away; otherwise wait for every imposter (or the timer)
-      const right = r.guesses[p.id] != null && sameWord(r.guesses[p.id], r.prompt.word);
+      const right = r.guesses[p.id] != null && guessMatches(r.guesses[p.id], r.prompt.word);
       if (right || r.imposterIds.every((id) => id in r.guesses || !room.players.some((q) => q.id === id && q.connected))) return finish(room);
       return broadcast(room);
     }
 
     case 'again':
       if (p.id !== room.hostId || room.phase !== 'results') return;
-      if (!startRound(room)) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`);
+      if (!startRound(room)) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`, { min: CFG.MIN_PLAYERS });
       return;
 
     case 'lobby':
