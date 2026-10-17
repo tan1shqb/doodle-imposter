@@ -318,16 +318,22 @@ async function main() {
     big.send({ t: 'create', name: 'P0', public: false });
     await big.until((c) => c.joined, 'big room');
     const crowd = [];
-    for (let i = 1; i < 8; i++) {
+    for (let i = 1; i < 10; i++) {
       const p = await track(`P${i}`);
       p.send({ t: 'join', code: big.joined.code, name: `P${i}` });
       crowd.push(p);
     }
-    await big.until((c) => c.state.room.players.length === 8, '8 players');
-    const ninth = await track('P9');
-    ninth.send({ t: 'join', code: big.joined.code, name: 'P9' });
-    await ninth.until((c) => c.errors.length, 'full');
-    ok(ninth.errors[0].code === 'full', 'a ninth player is turned away');
+    await big.until((c) => c.state.room.players.length === 10, '10 players');
+    ok(new Set(big.state.room.players.map((p) => p.color)).size === 10, 'all 10 players get their own colour');
+    big.send({ t: 'setImposters', value: 4 });
+    await big.until((c) => c.state.room.imposters === 4, '4 imposters');
+    big.send({ t: 'setImposters', value: 5 });
+    await sleep(100);
+    ok(big.state.room.imposters === 4, '10 players allow up to 4 imposters, not 5');
+    const eleventh = await track('P10');
+    eleventh.send({ t: 'join', code: big.joined.code, name: 'P10' });
+    await eleventh.until((c) => c.errors.length, 'full');
+    ok(eleventh.errors[0].code === 'full', 'an eleventh player is turned away');
 
     const x = [await track('X1'), await track('X2'), await track('X3')];
     x[0].send({ t: 'create', name: 'X1', public: false });

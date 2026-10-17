@@ -22,7 +22,7 @@ const num = (v, d) => {
 const CFG = {
   PORT: num(process.env.PORT, 3000),
   MIN_PLAYERS: 3,
-  MAX_PLAYERS: 8,
+  MAX_PLAYERS: 10,
   READY_MS: num(process.env.DI_READY_MS, 20000), // read the prompt
   DRAW_MS: num(process.env.DI_DRAW_MS, 45000), // draw
   REVEAL_MS: num(process.env.DI_REVEAL_MS, 15000), // discuss
@@ -572,7 +572,7 @@ function addPlayer(room, name, ws) {
     id: crypto.randomBytes(4).toString('hex'),
     token: crypto.randomBytes(16).toString('hex'),
     name: uniqueName(room, cleanName(name)),
-    color: color % 8,
+    color: color % CFG.MAX_PLAYERS, // one avatar colour per seat (COLORS in public/app.js)
     ws,
     connected: true,
     ready: false,

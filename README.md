@@ -1,6 +1,6 @@
 # Doodle Imposter
 
-A draw-and-bluff party game for 3 to 8 players on their own phones. Everyone
+A draw-and-bluff party game for 3 to 10 players on their own phones. Everyone
 gets the same word to draw, except the imposter, who only gets a vague hint.
 Draw, reveal, vote, find the imposter.
 
@@ -27,7 +27,7 @@ screenshots of the key screens.
 
 1. One player creates a room (private, or listed in "Public lobbies"). Others join with the
    5-character code, a QR code or link, or by picking a public lobby.
-2. The host picks how many imposters (1 to 3; there must always be more innocents than imposters)
+2. The host picks how many imposters (1 to 4; there must always be more innocents than imposters)
    and starts. The server picks the imposters and a prompt. Normal players see the category and
    word; imposters only see a hint, and don't know who the other imposters are.
 3. Everyone draws for 45 seconds. Unsubmitted drawings are submitted automatically at zero.

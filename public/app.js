@@ -4,7 +4,7 @@
 
   const NS = 'http://www.w3.org/2000/svg';
   const INK = '#1E1A2E';
-  const COLORS = ['#FFC9A8', '#FFE08A', '#9FC3FF', '#D9B8FF', '#FFB3C7', '#A8E6C3', '#FFCF9E', '#B8E0F0'];
+  const COLORS = ['#FFC9A8', '#FFE08A', '#9FC3FF', '#D9B8FF', '#FFB3C7', '#A8E6C3', '#FFCF9E', '#B8E0F0', '#D4EE8E', '#FF9E9E'];
   const SIZES = [0.008, 0.016, 0.032];
   const SIZE_NAMES = ['Small brush', 'Medium brush', 'Large brush'];
   // Paint colours. Strokes store the index (`c`), so keep the order and length in step with server.js.
@@ -691,7 +691,7 @@
       h('div', { class: 'spacer' }),
       btn('Create game', () => { S.local = 'create'; route(); }),
       btn('Join game', () => { S.local = 'join'; route(); }, { secondary: true }),
-      h('p', { class: 'small center', text: '3–8 players · no account needed' })));
+      h('p', { class: 'small center', text: '3–10 players · no account needed' })));
   };
 
   // ----- create
@@ -828,8 +828,8 @@
         isHost ? step('More imposters', 1, n >= most) : null),
       isHost
         ? h('p', { class: 'small', text: more <= st.room.max
-          ? `There must be more players than imposters. ${more} players allows ${most + 1}.`
-          : 'There must be more players than imposters.' })
+          ? `There must be more innocents than imposters. ${more} players allows ${most + 1}.`
+          : 'There must be more innocents than imposters.' })
         : null);
   }
 
