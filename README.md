@@ -30,7 +30,7 @@ screenshots of the key screens.
 2. The host starts. The server picks the imposter and a prompt. Normal players see the category
    and word; the imposter only sees a hint.
 3. Everyone draws for 45 seconds. Unsubmitted drawings are submitted automatically at zero.
-4. All drawings are revealed at once. Players discuss, then vote (45 seconds).
+4. All drawings are revealed at once. Players discuss (15 seconds), then vote (15 seconds).
 5. If the imposter is the single most-voted player they are caught, but get one guess at the word.
    A right guess steals the win. A tie, no votes, or voting for the wrong person lets the imposter win.
 
@@ -69,7 +69,7 @@ Rooms live in memory. Restarting the server ends all games, and one instance hol
 ## Settings
 
 Timers can be changed with environment variables (milliseconds): `DI_READY_MS` (20000),
-`DI_DRAW_MS` (45000), `DI_REVEAL_MS` (60000), `DI_VOTE_MS` (45000), `DI_GUESS_MS` (20000), `DI_DROP_MS` (30000).
+`DI_DRAW_MS` (45000), `DI_REVEAL_MS` (15000), `DI_VOTE_MS` (15000), `DI_GUESS_MS` (20000), `DI_DROP_MS` (30000).
 
 ## Files
 

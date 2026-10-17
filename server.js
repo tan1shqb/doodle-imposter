@@ -25,8 +25,8 @@ const CFG = {
   MAX_PLAYERS: 8,
   READY_MS: num(process.env.DI_READY_MS, 20000), // read the prompt
   DRAW_MS: num(process.env.DI_DRAW_MS, 45000), // draw
-  REVEAL_MS: num(process.env.DI_REVEAL_MS, 60000), // discuss
-  VOTE_MS: num(process.env.DI_VOTE_MS, 45000), // vote
+  REVEAL_MS: num(process.env.DI_REVEAL_MS, 15000), // discuss
+  VOTE_MS: num(process.env.DI_VOTE_MS, 15000), // vote
   GUESS_MS: num(process.env.DI_GUESS_MS, 20000), // imposter's word guess
   GRACE_MS: num(process.env.DI_GRACE_MS, 20000), // lobby disconnect grace
   DROP_MS: num(process.env.DI_DROP_MS, 30000), // mid-round disconnect grace before they are removed
