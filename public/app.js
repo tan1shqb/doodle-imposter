@@ -11,7 +11,7 @@
   const PALETTE = [INK, '#9E9E9E', '#E53935', '#FB8C00', '#FDD835', '#43A047', '#1E88E5', '#8E24AA', '#F48FB1', '#795548'];
   const PALETTE_NAMES = ['Black', 'Grey', 'Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink', 'Brown'];
   // Reveal-screen reactions. The server only knows them by index, so keep the length in step with server.js.
-  const REACTIONS = [['😂', 'Funny'], ['🤔', 'Hmm'], ['🕵️', 'Suspicious'], ['👏', 'Nice']];
+  const REACTIONS = [['😂', 'Funny'], ['😭', 'Crying'], ['❤️', 'Love'], ['👍', 'Thumbs up']];
   // Bucket fills are worked out on a fixed-size copy of the drawing so every screen fills the same area.
   const FILL_W = 320;
   const FILL_H = 400;
