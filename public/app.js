@@ -10,6 +10,8 @@
   // Paint colours. Strokes store the index (`c`), so keep the order and length in step with server.js.
   const PALETTE = [INK, '#9E9E9E', '#E53935', '#FB8C00', '#FDD835', '#43A047', '#1E88E5', '#8E24AA', '#F48FB1', '#795548'];
   const PALETTE_NAMES = ['Black', 'Grey', 'Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink', 'Brown'];
+  // Reveal-screen reactions. The server only knows them by index, so keep the length in step with server.js.
+  const REACTIONS = [['😂', 'Funny'], ['🤔', 'Hmm'], ['🕵️', 'Suspicious'], ['👏', 'Nice']];
   // Bucket fills are worked out on a fixed-size copy of the drawing so every screen fills the same area.
   const FILL_W = 320;
   const FILL_H = 400;
@@ -86,6 +88,9 @@
     share: '<circle cx="6" cy="12" r="3"/><circle cx="18" cy="5" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.7 10.6 L15.3 6.4 M8.7 13.4 L15.3 17.6"/>',
     refresh: '<path d="M20 12 A8 8 0 1 1 17 6 M20 3 V8 H15"/>',
     zoom: '<circle cx="10" cy="10" r="6"/><path d="M15 15 L21 21 M10 7 V13 M7 10 H13"/>',
+    x: '<path d="M6 6 L18 18 M18 6 L6 18"/>',
+    sound: '<path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/><path d="M16 9 Q18 12 16 15 M19 6 Q23 12 19 18"/>',
+    mute: '<path d="M4 9 H8 L13 5 V19 L8 15 H4 Z"/><path d="M16 9 L22 15 M22 9 L16 15"/>',
     hat: '<path d="M5 11 L7 4 H17 L19 11 Z"/><path d="M3 11 H21"/><circle cx="8" cy="17" r="3"/><circle cx="16" cy="17" r="3"/><path d="M11 17 H13"/>',
   };
   function icon(name, size = 24, color = INK) {
@@ -122,6 +127,64 @@
     toastTimer = setTimeout(() => $toast.classList.remove('show'), 3000);
   }
 
+  // ------------------------------------------------------- sound + vibration
+  // Synthesised beeps, so there are no audio files to load. Browsers only allow audio
+  // after a tap, so the context is created (and resumed) on the first touch.
+  const sound = (() => {
+    let ac = null;
+    let on = store.get('di_sound') !== 'off';
+    const unlock = () => {
+      try {
+        if (navigator.audioSession) navigator.audioSession.type = 'ambient'; // respect the iPhone silent switch
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!ac && AC) ac = new AC();
+        if (ac && ac.state === 'suspended') ac.resume();
+      } catch { /* no audio */ }
+    };
+    document.addEventListener('pointerdown', unlock, { capture: true, passive: true });
+    function tone(freq, dur, { type = 'sine', vol = 0.15, at = 0, to = 0 } = {}) {
+      const t = ac.currentTime + at;
+      const o = ac.createOscillator();
+      const g = ac.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t);
+      if (to) o.frequency.exponentialRampToValueAtTime(to, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(ac.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    }
+    const sounds = {
+      tick: () => tone(1000, 0.07, { type: 'square', vol: 0.05 }),
+      warn: () => { tone(660, 0.12, { type: 'triangle' }); tone(880, 0.16, { type: 'triangle', at: 0.14 }); },
+      timeup: () => tone(420, 0.45, { type: 'sawtooth', vol: 0.08, to: 140 }),
+      reveal: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.22, { type: 'triangle', at: i * 0.09 })),
+    };
+    return {
+      get on() { return on; },
+      toggle() { on = !on; store.set('di_sound', on ? 'on' : 'off'); },
+      play(name, vibrate) {
+        if (!on) return;
+        try { if (ac && ac.state === 'running') sounds[name](); } catch { /* ignore */ }
+        try { if (vibrate && navigator.vibrate) navigator.vibrate(vibrate); } catch { /* ignore */ }
+      },
+    };
+  })();
+
+  /** Ticks through the last five seconds of a timer, with an optional earlier warning. Call from a screen's tick(). */
+  function countdown(warnAt, onWarn) {
+    let last = null;
+    let warned = false;
+    return (deadline) => {
+      if (!deadline) return;
+      const sec = Math.ceil((deadline - nowMs()) / 1000);
+      if (warnAt && !warned && sec <= warnAt && sec > 5) { warned = true; onWarn(); }
+      if (sec >= 1 && sec <= 5 && sec !== last) { last = sec; sound.play('tick', 25); }
+    };
+  }
+
   function setBg(color) {
     document.documentElement.style.setProperty('--bg', color);
     const m = document.querySelector('meta[name=theme-color]');
@@ -138,13 +201,24 @@
   const btn = (text, onClick, opts = {}) =>
     h('button', { class: `btn${opts.secondary ? ' secondary' : ''}${opts.small ? ' small-btn' : ''}`, type: 'button', disabled: opts.disabled, onClick }, text);
 
-  function header(title, onBack) {
+  function header(title, onBack, right) {
     return h('div', { class: 'row' },
       onBack
         ? h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Back', onClick: onBack }, icon('back', 30))
         : h('div', null),
       h('h1', { class: 'h1 grow', text: title }),
-      h('div', { class: 'icon-btn' }));
+      right || h('div', { class: 'icon-btn' }));
+  }
+  function soundBtn() {
+    const b = h('button', { class: 'icon-btn', type: 'button' });
+    const paint = () => {
+      b.replaceChildren(icon(sound.on ? 'sound' : 'mute', 28));
+      b.setAttribute('aria-label', 'Sound and vibration');
+      b.setAttribute('aria-pressed', String(sound.on));
+    };
+    b.addEventListener('click', () => { sound.toggle(); paint(); sound.play('tick', 25); });
+    paint();
+    return b;
   }
   const screenEl = (cls, ...kids) => h('div', { class: `screen ${cls || ''}` }, ...kids);
 
@@ -526,6 +600,10 @@
         S.offset = m.serverNow - Date.now();
         if (m.drawings) S.drawings[m.room.round] = m.drawings;
         m.drawings = S.drawings[m.room.round];
+        if (m.drawings) { // players who left mid-round drop out of the reveal and the vote
+          const ids = new Set(m.room.players.map((p) => p.id));
+          m.drawings = m.drawings.filter((d) => ids.has(d.id));
+        }
         if (S.ui.round !== m.room.round) {
           S.ui.round = m.room.round;
           S.ui.voteChoice = null;
@@ -554,6 +632,12 @@
         clearSession();
         route();
         break;
+      case 'kicked':
+      case 'ended':
+        clearSession();
+        route();
+        toast(m.t === 'kicked' ? 'The host removed you from the lobby.' : m.message);
+        break;
       default:
     }
   }
@@ -571,7 +655,8 @@
 
   // ---------------------------------------------------------------- screens
   const me = (st) => st.room.players.find((p) => p.id === st.you);
-  const connectedCount = (st) => st.room.players.filter((p) => p.connected).length;
+  const playing = (p) => p.connected && !p.waiting; // in this round and online
+  const connectedCount = (st) => st.room.players.filter(playing).length;
 
   function statusList(st, key, doneText, waitText) {
     return h('div', { class: 'plist' }, st.room.players.map((p) => {
@@ -579,7 +664,7 @@
       return h('div', { class: 'prow' },
         avatar(p.color),
         h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
-        h('span', { class: `st${done ? ' ok' : ''}`, text: !p.connected ? 'away' : done ? `✓ ${doneText}` : waitText }));
+        h('span', { class: `st${done ? ' ok' : ''}`, text: p.waiting ? 'next round' : !p.connected ? 'away' : done ? `✓ ${doneText}` : waitText }));
     }));
   }
 
@@ -661,7 +746,7 @@
           avatar(l.color),
           h('div', { class: 'grow' },
             h('div', { class: 'h2', text: `${l.host}'s game` }),
-            h('div', { class: 'st small' }, h('span', { class: 'dot' }), ` ${l.players}/${l.max} players · Waiting`)),
+            h('div', { class: 'st small' }, h('span', { class: 'dot' }), ` ${l.players}/${l.max} players · ${l.playing ? 'Playing, join for next round' : 'Waiting'}`)),
           h('button', { class: 'btn small-btn', type: 'button', 'aria-label': `Join ${l.host}'s game`, onClick: () => doJoin(l.code) }, 'Join')));
       }
     }
@@ -691,7 +776,7 @@
     const isHost = r.host === st.you;
     const ready = connectedCount(st) >= r.min;
     root.append(screenEl('',
-      header('Game Lobby', leaveGame),
+      header('Game Lobby', leaveGame, soundBtn()),
       h('p', { class: 'sub', text: 'Share this code with your friends' }),
       h('div', { class: 'panel center' },
         h('div', { class: 'big-word code-big', text: r.code, 'aria-label': `Room code ${r.code.split('').join(' ')}` }),
@@ -705,7 +790,12 @@
           avatar(p.color),
           h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
           p.id === r.host ? h('span', { class: 'host-tag', text: 'Host' }) : null,
-          h('span', { class: 'st' }, h('span', { class: `dot${p.connected ? '' : ' off'}` }), p.connected ? 'ready' : 'away')))),
+          h('span', { class: 'st' }, h('span', { class: `dot${p.connected ? '' : ' off'}` }), p.connected ? 'ready' : 'away'),
+          isHost && p.id !== st.you
+            ? h('button', { class: 'kick', type: 'button', 'aria-label': `Remove ${p.name}`, onClick: () => {
+              if (confirm(`Remove ${p.name} from the lobby?`)) send({ t: 'kick', target: p.id });
+            } }, icon('x', 18))
+            : null))),
       isHost
         ? h('label', { class: 'check' },
           h('input', { type: 'checkbox', checked: r.public, onChange: (e) => send({ t: 'setPublic', value: e.target.checked }) }),
@@ -718,13 +808,32 @@
         : btn('Waiting for host…', () => {}, { disabled: true })));
   };
 
+  /** Big text that shrinks until its longest word fits on a line, so words never break in the middle. */
+  function bigText(cls, text) {
+    const el = h('div', { class: cls });
+    for (const w of String(text).split(/\s+/).filter(Boolean)) el.append(h('span', { class: 'bw', text: w }), ' ');
+    const fit = () => {
+      if (!el.isConnected) return;
+      el.style.fontSize = '';
+      const room = el.clientWidth;
+      for (let i = 0; i < 4 && room; i++) { // letter spacing does not scale, so it can take a second pass
+        const widest = Math.max(0, ...[...el.children].map((s) => s.getBoundingClientRect().width));
+        if (widest <= room) break;
+        el.style.fontSize = `${Math.floor((parseFloat(getComputedStyle(el).fontSize) * room * 0.96) / widest)}px`;
+      }
+    };
+    requestAnimationFrame(fit);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+    return el;
+  }
+
   // ----- prompt (read your word / hint, tap ready)
   function promptScreen(root, st, waiting) {
     const sec = st.secret;
     const imp = sec.role === 'imposter';
     setBg(imp ? '#FFF0B0' : '#CFE8FF');
     const r = st.room;
-    const readyN = r.players.filter((p) => p.connected && p.ready).length;
+    const readyN = r.players.filter((p) => playing(p) && p.ready).length;
     root.append(screenEl('',
       h('div', { class: 'row between' },
         h('span', { class: 'label', text: `ROUND ${r.round}` }),
@@ -733,8 +842,8 @@
           : h('span', { class: 'row small' }, icon('eye', 26), 'Keep this secret')),
       h('h1', { class: 'h1 xl', text: imp ? 'Your hint' : 'Your prompt' }),
       imp
-        ? h('div', { class: 'card shadow col center' }, h('div', { class: 'qmark', text: '?' }), h('div', { class: 'big-word mid', text: sec.hint }))
-        : h('div', { class: 'card shadow col center' }, h('div', { class: 'caps', text: `Category: ${sec.category}` }), h('div', { class: 'big-word', text: sec.word })),
+        ? h('div', { class: 'card shadow col center' }, h('div', { class: 'qmark', text: '?' }), bigText('big-word mid', sec.hint))
+        : h('div', { class: 'card shadow col center' }, h('div', { class: 'caps', text: `Category: ${sec.category}` }), bigText('big-word', sec.word)),
       h('p', { class: 'sub tall', text: imp ? "You don't know the secret word. Draw something that fits the hint." : 'Draw the word without showing anyone your screen.' }),
       h('div', { class: 'spacer' }),
       waiting
@@ -817,10 +926,19 @@
       return b;
     };
 
+    const pill = timerPill(st.room.deadline);
+    const banner = h('div', { class: 'warn-banner', role: 'status', hidden: true }, '10 seconds left!');
+    wrap.append(banner);
+    const beeps = countdown(10, () => {
+      pill.classList.add('warn');
+      banner.hidden = false;
+      setTimeout(() => { banner.hidden = true; }, 2600);
+      sound.play('warn', [90, 60, 90]);
+    });
     root.append(screenEl('fit draw',
       h('div', { class: 'row between' },
         h('h1', { class: 'h1 left', text: 'Draw your answer' }),
-        timerPill(st.room.deadline)),
+        pill),
       h('div', { class: 'pill paper' }, imp ? 'Your hint: ' : 'Your word: ', h('b', { class: 'chip-word', text: imp ? sec.hint : sec.word.toUpperCase() })),
       wrap,
       h('div', { class: 'tools' },
@@ -839,7 +957,13 @@
 
     return {
       update(s) { cur = s; },
-      tick() { if (!submitted && cur.room.deadline && cur.room.deadline - nowMs() <= 500) submit(); },
+      tick() {
+        beeps(cur.room.deadline);
+        if (!submitted && cur.room.deadline && cur.room.deadline - nowMs() <= 500) {
+          submit();
+          sound.play('timeup', 300);
+        }
+      },
       destroy() {
         document.removeEventListener('visibilitychange', onHide);
         clearTimeout(tmr);
@@ -854,7 +978,7 @@
     setBg('#E3F6EA');
     const r = st.room;
     const total = connectedCount(st);
-    const done = r.players.filter((p) => p.connected && p.submitted).length;
+    const done = r.players.filter((p) => playing(p) && p.submitted).length;
     root.append(screenEl('',
       h('h1', { class: 'h1', text: 'Drawing locked in!' }),
       h('div', { class: 'locked' }, thumb(S.ui.myStrokes), h('span', { class: 'lockbadge' }, icon('lock', 22))),
@@ -862,7 +986,7 @@
         h('div', { class: 'h2 big', text: 'Waiting for others…' }),
         h('div', { class: 'small' }, `${done} of ${total} submitted · `, timerText(r.deadline), ' left')),
       h('div', { class: 'progress', role: 'img', 'aria-label': `${done} of ${total} drawings submitted` },
-        r.players.filter((p) => p.connected).map((p) => h('i', { class: p.submitted ? 'on' : '' }))),
+        r.players.filter(playing).map((p) => h('i', { class: p.submitted ? 'on' : '' }))),
       statusList(st, 'submitted', 'done', '✎ still drawing…')));
   };
 
@@ -870,14 +994,45 @@
   function revealScreen(root, st, waiting) {
     setBg('#E0D8FF');
     const r = st.room;
-    const readyN = r.players.filter((p) => p.connected && p.ready).length;
+    if (S.ui.revealed !== r.round) {
+      S.ui.revealed = r.round;
+      sound.play('reveal', [60, 40, 120]);
+    }
+    const cards = {}; // drawing id -> { el, buttons, counts }
     const tiles = (st.drawings || []).map((d) => {
       const mine = d.id === st.you;
-      return h('button', {
-        class: `tile${mine ? ' me' : ''}`, type: 'button', 'aria-label': `Enlarge ${mine ? 'your' : `${d.name}'s`} drawing`,
-        onClick: () => openSheet([h('div', { class: 'h2', text: mine ? `${d.name} (You)` : d.name }), thumb(d.strokes)]),
-      }, thumb(d.strokes), h('span', { class: 'cap', text: mine ? `${d.name} (You)` : d.name }));
+      const name = mine ? `${d.name} (You)` : d.name;
+      const card = { counts: [], buttons: REACTIONS.map(([emoji, label], i) => h('button', {
+        class: 'react', type: 'button', 'aria-label': `${label} reaction for ${name}`, 'aria-pressed': 'false',
+        onClick: () => send({ t: 'react', target: d.id, r: i }),
+      }, h('span', { text: emoji }), h('b', { class: 'n' }))) };
+      card.el = h('div', { class: 'tile-wrap' },
+        h('button', {
+          class: `tile${mine ? ' me' : ''}`, type: 'button', 'aria-label': `Enlarge ${mine ? 'your' : `${d.name}'s`} drawing`,
+          onClick: () => openSheet([h('div', { class: 'h2', text: name }), thumb(d.strokes)]),
+        }, thumb(d.strokes), h('span', { class: 'cap', text: name })),
+        h('div', { class: 'reacts', role: 'group', 'aria-label': `Reactions for ${name}` }, card.buttons));
+      cards[d.id] = card;
+      return card.el;
     });
+    const status = h('p', { class: 'small center' });
+    function paint(s) {
+      const readyN = s.room.players.filter((p) => playing(p) && p.ready).length;
+      status.replaceChildren(waiting ? `${readyN} of ${connectedCount(s)} ready · ` : '', 'voting starts in ', timerText(s.room.deadline));
+      const here = new Set((s.drawings || []).map((d) => d.id));
+      for (const [id, card] of Object.entries(cards)) {
+        if (!here.has(id)) { card.el.remove(); continue; } // they left the game
+        const counts = (s.reactions || {})[id] || [];
+        card.buttons.forEach((b, i) => {
+          const c = counts[i] || { n: 0, mine: false };
+          b.lastChild.textContent = c.n ? String(c.n) : '';
+          b.setAttribute('aria-pressed', String(c.mine));
+          if (c.n > (card.counts[i] || 0)) { b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); }
+          card.counts[i] = c.n;
+        });
+      }
+    }
+    paint(st);
     root.append(screenEl('',
       h('div', { class: 'center' },
         h('h1', { class: 'h1', text: 'Who looks suspicious?' }),
@@ -885,8 +1040,9 @@
       h('div', { class: 'grid2' }, tiles),
       h('p', { class: 'small center row' }, icon('zoom', 22, '#3B3560'), 'Tap a drawing to enlarge it'),
       h('div', { class: 'spacer' }),
-      h('p', { class: 'small center' }, waiting ? `${readyN} of ${connectedCount(st)} ready · ` : '', 'voting starts in ', timerText(r.deadline)),
+      status,
       waiting ? btn('Waiting for others…', () => {}, { disabled: true }) : btn('Vote now', () => send({ t: 'ready' }))));
+    return { update: paint };
   }
   screens.reveal = (root, st) => revealScreen(root, st, false);
   screens.revealWait = (root, st) => revealScreen(root, st, true);
@@ -920,20 +1076,21 @@
       h('p', { class: 'small center row' }, icon('lock', 20, '#33405A'), 'Votes stay hidden until everyone has voted.'),
       h('div', { class: 'spacer' }),
       submit));
-    return { update() {} };
+    const beeps = countdown(0);
+    return { update() {}, tick() { beeps(st.room.deadline); } };
   };
 
   screens.voteWait = (root, st) => {
     setBg('#D3EAFF');
     const total = connectedCount(st);
-    const done = st.room.players.filter((p) => p.connected && p.voted).length;
+    const done = st.room.players.filter((p) => playing(p) && p.voted).length;
     root.append(screenEl('',
       h('h1', { class: 'h1 xl', text: 'Vote locked in!' }),
       h('div', { class: 'center' },
         h('div', { class: 'h2 big', text: 'Waiting for others…' }),
         h('div', { class: 'small' }, `${done} of ${total} voted · `, timerText(st.room.deadline), ' left')),
       h('div', { class: 'progress', role: 'img', 'aria-label': `${done} of ${total} votes in` },
-        st.room.players.filter((p) => p.connected).map((p) => h('i', { class: p.voted ? 'on' : '' }))),
+        st.room.players.filter(playing).map((p) => h('i', { class: p.voted ? 'on' : '' }))),
       statusList(st, 'voted', 'voted', 'thinking…')));
   };
 
@@ -953,7 +1110,7 @@
       h('div', { class: 'center' },
         h('h1', { class: 'h1 huge', text: 'Caught!' }),
         h('p', { class: 'sub tall', text: 'The group voted for you. You still have one shot to steal the win.' })),
-      h('div', { class: 'card shadow col center' }, h('div', { class: 'caps small', text: 'Your hint was' }), h('div', { class: 'big-word mid', text: st.guess.hint || '' })),
+      h('div', { class: 'card shadow col center' }, h('div', { class: 'caps small', text: 'Your hint was' }), bigText('big-word mid', st.guess.hint || '')),
       h('div', { class: 'col' }, h('label', { class: 'label', for: 'gs', text: 'What was the secret word?' }), input,
         h('p', { class: 'small center', text: 'One guess only. Get it right and the imposter wins.' })),
       h('div', { class: 'spacer' }),
@@ -971,6 +1128,30 @@
         h('h1', { class: 'h1', text: 'Imposter caught!' }),
         h('p', { class: 'sub', text: 'They get one chance to guess the secret word. Fingers crossed…' })),
       h('div', { class: 'spacer' })));
+  };
+
+  // ----- joined mid-round: wait for the next one
+  screens.waitNext = (root, st) => {
+    setBg('#FFF6E5');
+    const r = st.room;
+    const doing = {
+      prompt: 'reading their prompts', draw: 'drawing', reveal: 'looking at the drawings',
+      vote: 'voting', guess: 'waiting on the imposter’s last guess', results: 'looking at the results',
+    }[r.phase] || 'playing';
+    root.append(screenEl('',
+      header("You're in!", leaveGame, soundBtn()),
+      h('div', { class: 'card shadow col center' },
+        h('div', { class: 'h2 big center', text: 'A round is already going' }),
+        h('p', { class: 'sub', text: `The others are ${doing}. You’ll join in from the next round.` })),
+      h('h2', { class: 'h2', text: `Players (${r.players.length}/${r.max})` }),
+      h('div', { class: 'plist' }, r.players.map((p) =>
+        h('div', { class: 'prow' },
+          avatar(p.color),
+          h('span', { class: 'grow', text: p.id === st.you ? `${p.name} (You)` : p.name }),
+          p.id === r.host ? h('span', { class: 'host-tag', text: 'Host' }) : null,
+          h('span', { class: 'st', text: p.waiting ? 'next round' : p.connected ? 'playing' : 'away' })))),
+      h('div', { class: 'spacer' }),
+      btn('Next round soon…', () => {}, { disabled: true })));
   };
 
   // ----- results
@@ -1021,7 +1202,8 @@
       name = S.local;
     } else {
       const m = me(st);
-      switch (st.room.phase) {
+      if (m && m.waiting && st.room.phase !== 'lobby') name = 'waitNext';
+      else switch (st.room.phase) {
         case 'lobby': name = 'lobby'; break;
         case 'prompt': name = m && m.ready ? 'promptWait' : 'prompt'; break;
         case 'draw': name = m && m.submitted ? 'drawWait' : 'draw'; break;
@@ -1053,6 +1235,8 @@
     });
     if (S.handle && S.handle.tick) S.handle.tick();
   }, 250);
+
+  if (new URLSearchParams(location.search).has('uitest')) window.diTest = { bigText }; // hook for test/ui.js
 
   route();
   connect();

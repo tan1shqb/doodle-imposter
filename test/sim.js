@@ -46,6 +46,7 @@ class Client {
         else if (m.t === 'error') this.errors.push(m);
         else if (m.t === 'lobbies') this.lobbies = m.lobbies;
         else if (m.t === 'notice') this.notices.push(m);
+        else if (m.t === 'ended' || m.t === 'kicked') this.ended = m;
       });
     });
   }
@@ -103,6 +104,7 @@ async function main() {
       DI_VOTE_MS: '1500',
       DI_GUESS_MS: '800',
       DI_GRACE_MS: '500',
+      DI_DROP_MS: '1500',
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -157,6 +159,22 @@ async function main() {
     B.send({ t: 'start' });
     await sleep(100);
     ok(A.phase() === 'lobby', 'only the host can start');
+    const K = await track('Kim');
+    K.send({ t: 'join', code, name: 'Kim' });
+    await A.until((c) => c.state.room.players.length === 5, 'Kim joins');
+    B.send({ t: 'kick', target: K.joined.id });
+    await sleep(100);
+    ok(A.state.room.players.length === 5 && !K.ended, 'only the host can kick');
+    A.send({ t: 'kick', target: A.state.you });
+    await sleep(100);
+    ok(A.state.room.players.length === 5, 'the host cannot kick themselves');
+    A.send({ t: 'kick', target: K.joined.id });
+    await A.until((c) => c.state.room.players.length === 4, 'Kim kicked');
+    ok(K.ended && K.ended.t === 'kicked', 'a kicked player is told and sent home');
+    ok(B.state.room.players.every((p) => p.id !== K.joined.id), 'everyone sees the kicked player gone');
+    K.send({ t: 'rejoin', code, token: K.joined.token });
+    await K.until((c) => c.errors.length, 'kicked rejoin');
+    ok(K.errors[0].code === 'rejoin_failed', 'a kicked player cannot rejoin with their old seat');
 
     // --------------------------------------------------- round 1
     console.log('Round 1: secrecy, late drawing, caught imposter, wrong guess');
@@ -276,11 +294,13 @@ async function main() {
     console.log('Joining after the game started');
     const E = await track('Late Eli');
     E.send({ t: 'join', code, name: 'Eli' });
-    await E.until((c) => c.errors.length, 'late join error');
-    ok(E.errors[0].code === 'started', 'cannot join a game in progress');
+    await E.until((c) => c.state, 'late join state');
+    ok(E.state.room.players.find((p) => p.id === E.state.you).waiting && !E.state.result, 'joining at the results waits for the next round, without seeing them');
     B.send({ t: 'lobby' });
-    await allPhase(now4, 'lobby');
-    ok(true, 'host can return everyone to the lobby');
+    await allPhase([...now4, E], 'lobby');
+    ok(E.state.room.players.every((p) => !p.waiting), 'host can return everyone to the lobby, late arrivals included');
+    E.send({ t: 'leave' });
+    await B.until((c) => c.state.room.players.length === 4, 'Eli leaves');
 
     // ------------------------------------------------------- edge rooms
     console.log('Edge cases');
@@ -320,9 +340,98 @@ async function main() {
     x.forEach((c) => c.send({ t: 'ready' }));
     await allPhase(x, 'draw');
     x[1].close();
-    x[2].close();
-    await x[0].until((c) => c.phase() === 'lobby', 'abort to lobby');
-    ok(x[0].notices.length === 1, 'the round is cancelled if too many players leave');
+    await sleep(300);
+    ok(x[0].phase() === 'draw' && !x[0].ended, 'a dropped connection gets time to come back');
+    await x[0].until((c) => c.ended, 'game ends after the drop window', 4000);
+    ok(x[0].ended.t === 'ended', 'the game ends once a dropped player leaves too few behind');
+
+    const room = async (prefix, n) => {
+      const cs = [];
+      for (let i = 0; i < n; i++) cs.push(await track(`${prefix}${i}`));
+      cs[0].send({ t: 'create', name: `${prefix}0`, public: false });
+      await cs[0].until((c) => c.joined, `${prefix} room`);
+      cs.slice(1).forEach((c, i) => c.send({ t: 'join', code: cs[0].joined.code, name: `${prefix}${i + 1}` }));
+      await cs[0].until((c) => c.state.room.players.length === n, `${prefix} players`);
+      cs[0].send({ t: 'start' });
+      return cs;
+    };
+    console.log('Late arrivals and reactions');
+    const L = await room('L', 3);
+    await allPhase(L, 'prompt');
+    L.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(L, 'draw');
+    const late2 = await track('Lucy');
+    late2.send({ t: 'join', code: L[0].joined.code, name: 'Lucy' });
+    await late2.until((c) => c.state, 'Lucy state');
+    const lucyId = late2.state.you;
+    ok(late2.state.room.players.find((p) => p.id === lucyId).waiting, 'joining mid-round puts you on the bench');
+    ok(!late2.state.secret && late2.raw.every((m) => !m.includes('"secret"')), 'a late arrival never sees the word or hint');
+    await L[0].until((c) => c.state.room.players.some((p) => p.id === lucyId && p.waiting), 'others see Lucy waiting');
+    ok(true, 'everyone else sees the late arrival waiting');
+    late2.send({ t: 'drawing', strokes: stroke(0.5), final: true });
+    L.forEach((c, i) => c.send({ t: 'drawing', strokes: stroke(0.1 + i / 10), final: true }));
+    await allPhase(L, 'reveal');
+    ok(L[0].drawings.length === 3 && L[0].drawings.every((d) => d.id !== lucyId), 'the round goes on without them, and their drawing is not used');
+    ok(late2.raw.every((m) => !m.includes('"drawings"')), 'a late arrival does not get the drawings');
+    const [La, Lb, Lc] = L;
+    const bId = Lb.state.you;
+    La.send({ t: 'react', target: bId, r: 1 });
+    await Lc.until((c) => c.state.reactions && c.state.reactions[bId] && c.state.reactions[bId][1].n === 1, 'reaction shows');
+    ok(La.state.reactions[bId][1].mine && !Lc.state.reactions[bId][1].mine, 'reactions show counts to everyone and your own as yours');
+    const lastRaw = Lc.raw[Lc.raw.length - 1];
+    ok(!JSON.stringify(JSON.parse(lastRaw).reactions).includes(La.state.you), 'reactions never say who reacted');
+    await sleep(200);
+    La.send({ t: 'react', target: bId, r: 1 });
+    await Lc.until((c) => c.state.reactions[bId][1].n === 0, 'reaction removed');
+    ok(true, 'tapping a reaction again takes it back');
+    await sleep(200);
+    La.send({ t: 'react', target: bId, r: 9 });
+    La.send({ t: 'react', target: 'nobody', r: 0 });
+    late2.send({ t: 'react', target: bId, r: 0 });
+    await sleep(200);
+    ok(Lc.state.reactions[bId].every((x) => x.n === 0) && !Lc.state.reactions.nobody, 'bad reactions and late arrivals are ignored');
+    L.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(L, 'vote');
+    ok(!L[0].state.reactions, 'reactions are only on the reveal screen');
+    La.send({ t: 'vote', target: lucyId });
+    await sleep(150);
+    ok(!La.state.room.players.find((p) => p.id === La.state.you).voted, 'you cannot vote for someone who is not in the round');
+    const Lrest = L.filter((c) => c !== Lb);
+    Lb.send({ t: 'leave' });
+    await Promise.all([...Lrest, late2].map((c) => c.until((x2) => x2.phase() === 'lobby', 'back to lobby')));
+    ok(!late2.ended && late2.state.room.players.length === 3, 'if the round runs short, waiting players keep the game alive in the lobby');
+    ok(late2.state.room.players.every((p) => !p.waiting), 'everyone in the lobby plays the next round');
+
+    console.log('Leaving mid-round');
+    const y = await room('Y', 5);
+    await toVote(y);
+    const yImp = imposterOf(y);
+    const [n1, n2, n3, n4] = y.filter((c) => c !== yImp);
+    n1.send({ t: 'vote', target: n2.state.you });
+    await n1.until((c) => c.state.room.players.find((p) => p.id === c.state.you).voted, 'n1 voted');
+    n2.send({ t: 'leave' });
+    await n1.until((c) => c.state.room.players.length === 4, 'n2 removed');
+    ok(n1.phase() === 'vote' && n1.notices.some((m) => m.message.includes('left')), 'a leaving player is removed and the round goes on');
+    ok(!n1.state.room.players.find((p) => p.id === n1.state.you).voted, 'a vote for a player who left is cleared');
+    n3.send({ t: 'leave' });
+    await n1.until((c) => c.state.room.players.length === 3, 'n3 removed');
+    n4.send({ t: 'leave' });
+    await Promise.all([n1, yImp].map((c) => c.until((x2) => x2.ended, 'ended')));
+    ok(n1.ended.t === 'ended' && yImp.ended.t === 'ended', 'the game ends for everyone when too few are left');
+    const lateY = await track('LateY');
+    lateY.send({ t: 'join', code: y[0].joined.code, name: 'LateY' });
+    await lateY.until((c) => c.errors.length, 'room gone');
+    ok(lateY.errors[0].code === 'no_room', 'the ended room is closed');
+
+    const z = await room('Z', 4);
+    await allPhase(z, 'prompt');
+    z.forEach((c) => c.send({ t: 'ready' }));
+    await allPhase(z, 'draw');
+    const zImp = imposterOf(z);
+    const zRest = z.filter((c) => c !== zImp);
+    zImp.send({ t: 'leave' });
+    await allPhase(zRest, 'lobby');
+    ok(zRest[0].state.room.players.length === 3 && zRest[0].notices.some((m) => m.message.includes('imposter')), 'the round is cancelled if the imposter leaves');
   } catch (e) {
     failures++;
     console.log(`  ✗ ${e.message}`);

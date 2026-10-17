@@ -29,6 +29,7 @@ const CFG = {
   VOTE_MS: num(process.env.DI_VOTE_MS, 45000), // vote
   GUESS_MS: num(process.env.DI_GUESS_MS, 20000), // imposter's word guess
   GRACE_MS: num(process.env.DI_GRACE_MS, 20000), // lobby disconnect grace
+  DROP_MS: num(process.env.DI_DROP_MS, 30000), // mid-round disconnect grace before they are removed
   ROOM_TTL_MS: 10 * 60 * 1000, // empty room lifetime
   MAX_ROOMS: 1000,
 };
@@ -131,6 +132,7 @@ function sameWord(a, b) {
 }
 
 const PALETTE_SIZE = 10; // colours in public/app.js PALETTE
+const REACTIONS = 4; // reaction buttons in public/app.js REACTIONS
 
 /** Validate and shrink a drawing sent by a client. Fill ops are `{ f: true, c, p: [[x, y]] }`. */
 function cleanStrokes(arr) {
@@ -196,10 +198,11 @@ function viewFor(room, p) {
         ready: q.ready,
         submitted: q.submitted,
         voted: q.hasVoted,
+        waiting: q.waiting,
       })),
     },
   };
-  if (!r) return view;
+  if (!r || p.waiting) return view; // late arrivals sit this round out and see nothing of it
   const isImposter = p.id === r.imposterId;
   if (room.phase === 'prompt' || room.phase === 'draw') {
     view.secret = isImposter
@@ -208,6 +211,13 @@ function viewFor(room, p) {
   }
   if ((room.phase === 'reveal' || room.phase === 'vote') && p.drawingsSent !== room.roundNo) {
     view.drawings = r.drawings; // sent once per round per player
+  }
+  if (room.phase === 'reveal') {
+    // counts only, plus which ones are yours: who reacted stays private
+    view.reactions = {};
+    for (const [target, lists] of Object.entries(r.reactions)) {
+      view.reactions[target] = lists.map((ids) => ({ n: ids.length, mine: ids.includes(p.id) }));
+    }
   }
   if (room.phase === 'guess') {
     view.guess = { imposter: isImposter, hint: isImposter ? r.prompt.hint : undefined };
@@ -240,7 +250,8 @@ function setPhase(room, phase, ms, onTimeout) {
   for (const p of room.players) p.ready = false;
 }
 
-const activeOf = (room) => room.players.filter((p) => p.connected);
+const inRound = (room) => room.players.filter((p) => !p.waiting);
+const activeOf = (room) => room.players.filter((p) => p.connected && !p.waiting);
 const allDone = (room, pred) => {
   const a = activeOf(room);
   return a.length > 0 && a.every(pred);
@@ -263,6 +274,7 @@ function startRound(room) {
   }
   room.players = room.players.filter((p) => p.connected);
   if (room.players.length < CFG.MIN_PLAYERS) return false;
+  for (const p of room.players) p.waiting = false;
   if (!room.players.some((p) => p.id === room.hostId)) room.hostId = room.players[0].id;
   const imposter = room.players[crypto.randomInt(room.players.length)];
   room.roundNo += 1;
@@ -270,6 +282,7 @@ function startRound(room) {
     imposterId: imposter.id,
     prompt: pickPrompt(room),
     drawings: null,
+    reactions: {},
     votes: {},
     guess: null,
     caught: false,
@@ -297,7 +310,7 @@ function startDraw(room) {
 function endDraw(room) {
   if (room.phase !== 'draw') return;
   // Late or missing submissions use whatever was last on the canvas.
-  room.round.drawings = room.players.map((p) => ({
+  room.round.drawings = inRound(room).map((p) => ({
     id: p.id,
     name: p.name,
     color: p.color,
@@ -360,7 +373,7 @@ function finish(room) {
     reason,
     guess: r.guess,
     guessCorrect,
-    tally: room.players
+    tally: inRound(room)
       .map((p) => ({ id: p.id, name: p.name, color: p.color, count: r.counts[p.id] || 0 }))
       .sort((a, b) => b.count - a.count),
   };
@@ -391,20 +404,64 @@ function abortToLobby(room, message) {
   setPhase(room, 'lobby', 0, null);
   room.round = null;
   for (const p of room.players) {
-    p.ready = p.submitted = p.hasVoted = false;
+    p.ready = p.submitted = p.hasVoted = p.waiting = false;
     p.strokes = [];
   }
-  for (const p of activeOf(room)) send(p.ws, { t: 'notice', message });
+  for (const p of room.players) if (p.connected) send(p.ws, { t: 'notice', message });
   broadcast(room);
 }
 
-function removePlayer(room, p) {
+function dropPlayer(room, p) {
   clearTimeout(p.graceTimer);
   room.players = room.players.filter((q) => q.id !== p.id);
   if (room.hostId === p.id) {
     const next = room.players.find((q) => q.connected) || room.players[0];
     room.hostId = next ? next.id : null;
   }
+}
+
+/** Close the room and send everyone still connected back to the home screen. */
+function endGame(room, message) {
+  clearTimeout(room.timer);
+  for (const q of room.players) {
+    clearTimeout(q.graceTimer);
+    if (q.ws) {
+      q.ws.ctx = null;
+      send(q.ws, { t: 'ended', message });
+    }
+  }
+  room.players = [];
+  rooms.delete(room.code);
+}
+
+/** Take a player out of a round in progress, ending or cancelling it if it cannot go on. */
+function leaveMidRound(room, p) {
+  if (p.waiting) return removePlayer(room, p);
+  dropPlayer(room, p);
+  if (inRound(room).length < CFG.MIN_PLAYERS) {
+    // players waiting for the next round can still make a game
+    if (room.players.length >= CFG.MIN_PLAYERS) return abortToLobby(room, 'Not enough players left in the round, so it was cancelled.');
+    return endGame(room, 'Not enough players left, so the game ended.');
+  }
+  const r = room.round;
+  if (p.id === r.imposterId) return abortToLobby(room, 'The imposter left, so the round was cancelled.');
+  delete r.votes[p.id];
+  for (const [voter, target] of Object.entries(r.votes)) {
+    if (target !== p.id) continue;
+    delete r.votes[voter]; // their pick is gone, so they vote again
+    const q = room.players.find((x) => x.id === voter);
+    if (q) q.hasVoted = false;
+  }
+  if (r.drawings) r.drawings = r.drawings.filter((d) => d.id !== p.id);
+  delete r.reactions[p.id];
+  for (const lists of Object.values(r.reactions)) lists.forEach((ids, i) => { lists[i] = ids.filter((id) => id !== p.id); });
+  for (const q of activeOf(room)) send(q.ws, { t: 'notice', message: `${p.name} left the game.` });
+  checkProgress(room);
+  if (room.phase !== 'results') broadcast(room);
+}
+
+function removePlayer(room, p) {
+  dropPlayer(room, p);
   if (!room.players.length) {
     clearTimeout(room.timer);
     rooms.delete(room.code);
@@ -429,7 +486,14 @@ function onDisconnect(room, p, left) {
     }, CFG.GRACE_MS);
     return broadcast(room);
   }
-  if (activeOf(room).length < 2) return abortToLobby(room, 'Too many players left, so the round was cancelled.');
+  if (left) return leaveMidRound(room, p);
+  p.graceTimer = setTimeout(() => {
+    if (!p.connected && room.players.includes(p)) {
+      p.token = null;
+      if (room.phase === 'lobby' || room.phase === 'results') removePlayer(room, p);
+      else leaveMidRound(room, p);
+    }
+  }, CFG.DROP_MS);
   checkProgress(room);
   if (room.phase === 'draw' || room.phase === 'prompt' || room.phase === 'reveal' || room.phase === 'vote' || room.phase === 'guess') {
     broadcast(room);
@@ -440,8 +504,8 @@ function onDisconnect(room, p, left) {
 function lobbyList() {
   const out = [];
   for (const room of rooms.values()) {
-    if (!room.public || room.phase !== 'lobby') continue;
-    const n = activeOf(room).length;
+    if (!room.public) continue;
+    const n = room.players.filter((p) => p.connected).length;
     if (!n || room.players.length >= CFG.MAX_PLAYERS) continue;
     const host = room.players.find((p) => p.id === room.hostId) || room.players[0];
     out.push({
@@ -450,6 +514,7 @@ function lobbyList() {
       color: host.color,
       players: room.players.length,
       max: CFG.MAX_PLAYERS,
+      playing: room.phase !== 'lobby',
       at: room.createdAt,
     });
   }
@@ -471,6 +536,8 @@ function addPlayer(room, name, ws) {
     submitted: false,
     strokes: [],
     hasVoted: false,
+    waiting: false, // joined mid-round: plays from the next round
+    lastReact: 0,
     drawingsSent: null,
     graceTimer: null,
   };
@@ -530,10 +597,10 @@ function handle(ws, msg) {
     case 'join': {
       const r = rooms.get(normCode(msg.code));
       if (!r) return err(ws, 'no_room', "We couldn't find that room. Check the code and try again.");
-      if (r.phase !== 'lobby') return err(ws, 'started', 'That game has already started.');
       if (r.players.length >= CFG.MAX_PLAYERS) return err(ws, 'full', 'That room is full.');
       detach(ws, true);
       const np = addPlayer(r, msg.name, ws);
+      np.waiting = r.phase !== 'lobby';
       return attach(ws, r, np);
     }
 
@@ -570,19 +637,45 @@ function handle(ws, msg) {
       room.public = !!msg.value;
       return broadcast(room);
 
+    case 'kick': {
+      if (p.id !== room.hostId || room.phase !== 'lobby') return;
+      const target = room.players.find((q) => q.id === String(msg.target ?? ''));
+      if (!target || target === p) return;
+      if (target.ws) {
+        target.ws.ctx = null;
+        send(target.ws, { t: 'kicked' });
+      }
+      target.token = null;
+      return removePlayer(room, target);
+    }
+
     case 'start':
       if (p.id !== room.hostId || room.phase !== 'lobby') return;
       if (activeOf(room).length < CFG.MIN_PLAYERS) return err(ws, 'few', `You need at least ${CFG.MIN_PLAYERS} players.`);
       return void startRound(room);
 
+    case 'react': {
+      if (room.phase !== 'reveal' || p.waiting) return;
+      const target = String(msg.target ?? '');
+      const i = Number(msg.r);
+      if (!Number.isInteger(i) || i < 0 || i >= REACTIONS) return;
+      if (!room.round.drawings.some((d) => d.id === target)) return;
+      const now = Date.now();
+      if (now - p.lastReact < 150) return; // a tap, not a flood
+      p.lastReact = now;
+      const lists = room.round.reactions[target] || (room.round.reactions[target] = Array.from({ length: REACTIONS }, () => []));
+      lists[i] = lists[i].includes(p.id) ? lists[i].filter((id) => id !== p.id) : [...lists[i], p.id]; // tap again to take it back
+      return broadcast(room);
+    }
+
     case 'ready':
-      if (room.phase !== 'prompt' && room.phase !== 'reveal') return;
+      if ((room.phase !== 'prompt' && room.phase !== 'reveal') || p.waiting) return;
       p.ready = true;
       if (allDone(room, (q) => q.ready)) return room.phase === 'prompt' ? startDraw(room) : startVote(room);
       return broadcast(room);
 
     case 'drawing':
-      if (room.phase !== 'draw' || p.submitted) return;
+      if (room.phase !== 'draw' || p.submitted || p.waiting) return;
       p.strokes = cleanStrokes(msg.strokes);
       if (msg.final) {
         p.submitted = true;
@@ -594,7 +687,7 @@ function handle(ws, msg) {
     case 'vote': {
       if (room.phase !== 'vote' || p.hasVoted) return;
       const target = String(msg.target ?? '');
-      if (target === p.id || !room.players.some((q) => q.id === target)) return;
+      if (p.waiting || target === p.id || !inRound(room).some((q) => q.id === target)) return;
       room.round.votes[p.id] = target;
       p.hasVoted = true;
       if (allDone(room, (q) => q.hasVoted)) return endVote(room);
@@ -614,6 +707,7 @@ function handle(ws, msg) {
     case 'lobby':
       if (p.id !== room.hostId || room.phase !== 'results') return;
       room.players = room.players.filter((q) => q.connected);
+      for (const q of room.players) q.waiting = false;
       room.round = null;
       setPhase(room, 'lobby', 0, null);
       return broadcast(room);

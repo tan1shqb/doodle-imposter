@@ -16,7 +16,12 @@ For a real hotel or event, deploy it (below) so guests can use a normal link and
 
 ```bash
 npm test           # full multiplayer simulation against the real server
+npm run test:ui    # phone-sized browser tests (drawing, lobby, reveal, timers)
 ```
+
+The browser tests use Playwright's Chromium. If it is not installed yet, run
+`npx playwright install chromium` once. `UI_SHOTS=some/folder npm run test:ui` also saves
+screenshots of the key screens.
 
 ## How a round works
 
@@ -35,7 +40,22 @@ npm test           # full multiplayer simulation against the real server
 - The imposter's identity is not sent until the results.
 - Rejoining uses a private token kept in the browser, so refreshing or a locked phone does not
   drop you. If the host leaves, host passes to the next player in join order.
-- If fewer than two players remain mid-round, the round is cancelled back to the lobby.
+- Anyone can join with the code while a round is going. They wait on a "next round" screen, see
+  nothing of the current round (no word, hint or drawings), and play from the next round.
+- On the reveal screen players can tap reactions on each drawing. Everyone sees the counts, never
+  who reacted. Tap again to take a reaction back.
+- The host can remove players from the lobby before the game starts (the × next to their name).
+- A player who taps Leave, or stays disconnected for 30 seconds mid-round (`DI_DROP_MS`), is removed
+  from the game. Votes for them are cleared so those players vote again.
+- If the imposter leaves, the round is cancelled back to the lobby. If fewer than 3 players are left,
+  the game ends and everyone returns to the home screen.
+
+## Sound and vibration
+
+Short synthesised beeps (no audio files) for the 10-second warning, the last five seconds of the
+drawing and voting timers, time running out, and the reveal, with matching vibration on phones that
+support it (not iPhones). The speaker button in the lobby turns both off, and the choice is
+remembered. On iPhone the silent switch mutes the sounds.
 
 ## Deploy
 
@@ -49,7 +69,7 @@ Rooms live in memory. Restarting the server ends all games, and one instance hol
 ## Settings
 
 Timers can be changed with environment variables (milliseconds): `DI_READY_MS` (20000),
-`DI_DRAW_MS` (45000), `DI_REVEAL_MS` (60000), `DI_VOTE_MS` (45000), `DI_GUESS_MS` (20000).
+`DI_DRAW_MS` (45000), `DI_REVEAL_MS` (60000), `DI_VOTE_MS` (45000), `DI_GUESS_MS` (20000), `DI_DROP_MS` (30000).
 
 ## Files
 
